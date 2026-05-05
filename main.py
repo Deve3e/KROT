@@ -57,129 +57,303 @@ class GameState(Enum):
     PLAYING = 4
 
 
+class Minimap:
+    """Minimap to show top-down view of underground tunnels and mole position"""
+    def __init__(self, x: int, y: int, width: int, height: int):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.zoom = 0.5  # Scale factor for world coordinates
+        self.center_x = x + width // 2
+        self.center_y = y + height // 2
+        
+    def world_to_minimap(self, world_x: float, world_z: float) -> tuple:
+        """Convert 3D world coordinates (x, z) to 2D minimap coordinates"""
+        map_x = self.center_x + (world_x * self.zoom)
+        map_y = self.center_y + (world_z * self.zoom)
+        return (map_x, map_y)
+    
+    def draw(self, surface: pygame.Surface, player: 'Player') -> None:
+        """Draw the minimap"""
+        # Draw background
+        pygame.draw.rect(surface, (50, 25, 0), (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(surface, (150, 100, 50), (self.x, self.y, self.width, self.height), 2)
+        
+        # Draw title
+        font_small = pygame.font.Font(None, 16)
+        title = font_small.render("Map", True, TEXT_WHITE)
+        surface.blit(title, (self.x + 5, self.y + 2))
+        
+        # Draw dug tunnels
+        for (grid_x, grid_y, grid_z) in player.dug_positions:
+            world_x = grid_x * player.tile_size
+            world_z = grid_z * player.tile_size
+            map_x, map_y = self.world_to_minimap(world_x, world_z)
+            
+            # Only draw if within minimap bounds
+            if (self.x < map_x < self.x + self.width and 
+                self.y < map_y < self.y + self.height):
+                pygame.draw.circle(surface, (100, 60, 20), (int(map_x), int(map_y)), 2)
+        
+        # Draw mole position
+        mole_map_x, mole_map_y = self.world_to_minimap(player.x, player.z)
+        pygame.draw.circle(surface, ACCENT_ORANGE, (int(mole_map_x), int(mole_map_y)), 4)
+        
+        # Draw direction indicator (small line showing forward direction)
+        forward_scale = 10
+        forward_x = mole_map_x - forward_scale
+        forward_y = mole_map_y
+        pygame.draw.line(surface, ACCENT_ORANGE, 
+                        (int(mole_map_x), int(mole_map_y)), 
+                        (int(forward_x), int(forward_y)), 2)
+
+
+import math
+
+
+class Camera3D:
+    """First-person 3D camera (Minecraft-style)"""
+    def __init__(self, screen_width: int, screen_height: int):
+        self.screen_width = screen_width
+        self.screen_height = screen_height
+        self.fov = 90  # Field of view
+        self.near = 0.1
+        self.far = 1000
+        self.aspect_ratio = screen_width / screen_height
+        self.yaw = 0  # Rotation around Y axis (left/right)
+        self.pitch = 0  # Rotation around X axis (up/down)
+        self.position = [0, 0, 0]  # x, y, z position in world
+        
+    def set_position(self, x: float, y: float, z: float) -> None:
+        """Set camera position"""
+        self.position = [x, y, z]
+    
+    def get_forward_vector(self) -> tuple:
+        """Get forward direction vector based on yaw and pitch"""
+        forward_x = math.sin(math.radians(self.yaw))
+        forward_y = -math.sin(math.radians(self.pitch))
+        forward_z = math.cos(math.radians(self.yaw))
+        return (forward_x, forward_y, forward_z)
+    
+    def project_point(self, x: float, y: float, z: float) -> tuple:
+        """Project 3D point to 2D screen using perspective projection"""
+        # Translate point relative to camera
+        rel_x = x - self.position[0]
+        rel_y = y - self.position[1]
+        rel_z = z - self.position[2]
+        
+        # Rotate by camera angle
+        cos_yaw = math.cos(math.radians(self.yaw))
+        sin_yaw = math.sin(math.radians(self.yaw))
+        
+        rotated_x = rel_x * cos_yaw - rel_z * sin_yaw
+        rotated_z = rel_x * sin_yaw + rel_z * cos_yaw
+        rotated_y = rel_y
+        
+        # Only project points in front of camera
+        if rotated_z <= 0.1:
+            return None
+        
+        # Perspective projection
+        scale = (self.screen_height / 2) / math.tan(math.radians(self.fov / 2))
+        screen_x = (self.screen_width / 2) + (rotated_x / rotated_z) * scale
+        screen_y = (self.screen_height / 2) + (rotated_y / rotated_z) * scale
+        depth = rotated_z
+        
+        return (screen_x, screen_y, depth)
+
+
+class Terrain3D:
+    """3D terrain/block system for Minecraft-like rendering"""
+    def __init__(self):
+        self.block_size = 1.0  # Size of each block
+        self.blocks = {}  # Dictionary of block positions: (x, y, z) -> block_type
+        self.dug_blocks = set()  # Track which blocks have been dug
+        
+    def add_block(self, x: int, y: int, z: int, block_type: str = "soil") -> None:
+        """Add a block at position"""
+        if (x, y, z) not in self.dug_blocks:
+            self.blocks[(x, y, z)] = block_type
+    
+    def remove_block(self, x: int, y: int, z: int) -> None:
+        """Remove a block (dig it)"""
+        self.dug_blocks.add((x, y, z))
+        if (x, y, z) in self.blocks:
+            del self.blocks[(x, y, z)]
+    
+    def is_block_at(self, x: int, y: int, z: int) -> bool:
+        """Check if there's a solid block at position"""
+        return (x, y, z) in self.blocks and (x, y, z) not in self.dug_blocks
+    
+    def generate_terrain(self, layer: str = "underground") -> None:
+        """Generate terrain for a layer"""
+        self.blocks.clear()
+        
+        if layer == "underground":
+            # Generate underground soil blocks in a reasonable area
+            for x in range(-20, 21):
+                for y in range(-10, 11):
+                    for z in range(-20, 21):
+                        # Create solid underground terrain
+                        self.add_block(x, y, z, "soil")
+            # Remove center area where player starts
+            for x in range(-5, 6):
+                for y in range(-3, 4):
+                    for z in range(-5, 6):
+                        self.remove_block(x, y, z)
+        
+        elif layer == "above_ground":
+            # Generate above ground (sky and grass)
+            for x in range(-20, 21):
+                for z in range(-20, 21):
+                    # Grass layer
+                    self.add_block(x, 0, z, "grass")
+                    # Dirt below
+                    for y in range(-5, 0):
+                        self.add_block(x, y, z, "soil")
+            
+            # Add some obstacles (vegetables/plants)
+            self.add_block(-8, 0, -8, "plant")
+            self.add_block(-8, 0, 8, "plant")
+            self.add_block(8, 0, -8, "plant")
+            self.add_block(8, 0, 8, "plant")
+    
+    def draw(self, surface: pygame.Surface, camera: Camera3D) -> None:
+        """Draw all visible blocks"""
+        # Collect blocks with depth for sorting
+        visible_blocks = []
+        
+        for (x, y, z), block_type in self.blocks.items():
+            proj = camera.project_point(x, y, z)
+            if proj is not None:
+                screen_x, screen_y, depth = proj
+                visible_blocks.append(((screen_x, screen_y, depth), block_type, (x, y, z)))
+        
+        # Sort by depth (back to front) for proper occlusion
+        visible_blocks.sort(key=lambda item: item[0][2], reverse=True)
+        
+        # Draw blocks
+        for (screen_x, screen_y, depth), block_type, (world_x, world_y, world_z) in visible_blocks:
+            if -100 < screen_x < camera.screen_width + 100 and -100 < screen_y < camera.screen_height + 100:
+                self._draw_block(surface, screen_x, screen_y, depth, block_type)
+    
+    def _draw_block(self, surface: pygame.Surface, screen_x: float, screen_y: float, depth: float, block_type: str) -> None:
+        """Draw a single block with perspective scaling"""
+        # Size decreases with distance
+        size = max(2, 20 / (depth + 0.5))
+        
+        # Choose color based on block type
+        if block_type == "soil":
+            color = (120, 80, 40)
+        elif block_type == "grass":
+            color = (100, 150, 60)
+        elif block_type == "plant":
+            color = (200, 100, 50)
+        else:
+            color = (100, 100, 100)
+        
+        # Draw block as a square
+        rect = pygame.Rect(screen_x - size/2, screen_y - size/2, size, size)
+        pygame.draw.rect(surface, color, rect)
+        pygame.draw.rect(surface, (50, 50, 50), rect, 1)
+
+
 class Player:
-    """Player (Mole) class"""
-    def __init__(self, start_x: int, start_y: int, size: int = 20):
+    """Player (Mole) class with 3D movement"""
+    def __init__(self, start_x: float, start_y: float, start_z: float, size: int = 20):
+        # 3D position
         self.x = start_x
         self.y = start_y
+        self.z = start_z
+        
         self.size = size
-        self.velocity_x = 0
-        self.velocity_y = 0
-        self.speed = 5
+        self.speed = 0.2
+        self.dig_speed = 0.3
         self.is_digging = False
         self.dig_cooldown = 0
-        self.dig_duration = 10  # frames
-        self.dug_tiles = set()  # Track where mole has dug
-        self.tile_size = 30  # Grid tile size for digging
-        
-        # Start position is automatically dug
-        self._mark_dug(start_x, start_y)
-        
-    def _mark_dug(self, x: int, y: int) -> None:
-        """Mark a position and surrounding area as dug"""
-        # Convert to grid position
-        grid_x = int(x // self.tile_size)
-        grid_y = int(y // self.tile_size)
-        
-        # Mark center and surrounding tiles as dug
-        for dx in range(-1, 2):
-            for dy in range(-1, 2):
-                self.dug_tiles.add((grid_x + dx, grid_y + dy))
+        self.dig_target_y = start_y
+        self.current_layer = "underground"  # underground or above_ground
+        self.dug_tunnels = set()  # Track dug positions
     
-    def _is_dug(self, x: int, y: int) -> bool:
-        """Check if a position has been dug"""
-        grid_x = int(x // self.tile_size)
-        grid_y = int(y // self.tile_size)
-        return (grid_x, grid_y) in self.dug_tiles
-    
-    def handle_input(self, keys) -> None:
-        """Handle keyboard input for movement"""
-        new_x = self.x
-        new_y = self.y
-        moved = False
+    def handle_input(self, keys, camera: Camera3D, terrain: Terrain3D) -> None:
+        """Handle keyboard input for 3D movement (Minecraft-style)"""
+        # Get forward and right vectors based on camera angle
+        forward_x = math.sin(math.radians(camera.yaw))
+        forward_z = math.cos(math.radians(camera.yaw))
+        right_x = -math.cos(math.radians(camera.yaw))
+        right_z = math.sin(math.radians(camera.yaw))
         
-        # Horizontal movement
-        if keys[pygame.K_LEFT]:
-            new_x = self.x - self.speed
-            moved = True
-        elif keys[pygame.K_RIGHT]:
-            new_x = self.x + self.speed
-            moved = True
-        
-        # Vertical movement
-        if keys[pygame.K_UP]:
-            new_y = self.y - self.speed
-            moved = True
-        elif keys[pygame.K_DOWN]:
-            new_y = self.y + self.speed
-            moved = True
-        
-        # Only allow movement if the new position is dug
-        if moved:
-            if self._is_dug(new_x, new_y):
+        # W/S for forward/backward
+        if keys[pygame.K_w]:
+            new_x = self.x + forward_x * self.speed
+            new_z = self.z + forward_z * self.speed
+            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
                 self.x = new_x
-                self.y = new_y
-            # If not dug, movement is blocked - velocity stays 0
-            self.velocity_x = 0
-            self.velocity_y = 0
-        else:
-            self.velocity_x = 0
-            self.velocity_y = 0
-    
-    def update(self, screen_width: int, screen_height: int) -> None:
-        """Update player position with bounds checking"""
-        # Bounds checking - keep player on screen
-        self.x = max(self.size, min(self.x, screen_width - self.size))
-        self.y = max(self.size, min(self.y, screen_height - self.size))
+                self.z = new_z
+        elif keys[pygame.K_s]:
+            new_x = self.x - forward_x * self.speed
+            new_z = self.z - forward_z * self.speed
+            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+                self.x = new_x
+                self.z = new_z
         
-        # Update dig cooldown
+        # A/D for strafing left/right
+        if keys[pygame.K_a]:
+            new_x = self.x + right_x * self.speed
+            new_z = self.z + right_z * self.speed
+            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+                self.x = new_x
+                self.z = new_z
+        elif keys[pygame.K_d]:
+            new_x = self.x - right_x * self.speed
+            new_z = self.z - right_z * self.speed
+            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+                self.x = new_x
+                self.z = new_z
+        
+        # Mouse for camera rotation
+        mouse_buttons = pygame.mouse.get_pressed()
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        # Camera rotation could be added here if needed
+        
+        # Q for dig up, E for dig down
+        if keys[pygame.K_q]:
+            self.dig_up(terrain)
+        elif keys[pygame.K_e]:
+            self.dig_down(terrain)
+    
+    def dig_up(self, terrain: Terrain3D) -> None:
+        """Dig upward"""
+        if self.dig_cooldown <= 0:
+            # Remove block above
+            for dy in range(1, 3):
+                block_x, block_y, block_z = int(self.x), int(self.y) + dy, int(self.z)
+                terrain.remove_block(block_x, block_y, block_z)
+            self.dig_cooldown = 15
+    
+    def dig_down(self, terrain: Terrain3D) -> None:
+        """Dig downward"""
+        if self.dig_cooldown <= 0:
+            # Remove block below
+            for dy in range(1, 3):
+                block_x, block_y, block_z = int(self.x), int(self.y) - dy, int(self.z)
+                terrain.remove_block(block_x, block_y, block_z)
+            self.dig_cooldown = 15
+    
+    def update(self) -> None:
+        """Update player state"""
         if self.dig_cooldown > 0:
             self.dig_cooldown -= 1
-        
-        if self.is_digging:
-            self.dig_duration -= 1
-            if self.dig_duration <= 0:
-                self.is_digging = False
-                self.dig_duration = 10
     
-    def start_dig(self) -> None:
-        """Start digging action and mark tiles as dug"""
-        if self.dig_cooldown <= 0:
-            self.is_digging = True
-            self.dig_duration = 10
-            self.dig_cooldown = 30  # 0.5 seconds at 60 FPS
-            # Mark the area around the mole as dug
-            self._mark_dug(self.x, self.y)
-    
-    def draw(self, surface: pygame.Surface, view_type: str) -> None:
-        """Draw the player (mole)"""
-        # Draw main body (circle)
-        pygame.draw.circle(surface, (139, 69, 19), (int(self.x), int(self.y)), self.size)
-        
-        # Draw eyes
-        eye_offset = self.size // 3
-        eye_size = 3
-        pygame.draw.circle(surface, TEXT_WHITE, (int(self.x - eye_offset), int(self.y - eye_offset)), eye_size)
-        pygame.draw.circle(surface, TEXT_WHITE, (int(self.x + eye_offset), int(self.y - eye_offset)), eye_size)
-        
-        # Draw digging effect
-        if self.is_digging:
-            for i in range(3):
-                offset = i * 5
-                pygame.draw.circle(surface, ACCENT_ORANGE, (int(self.x), int(self.y + self.size + offset)), 3)
-                pygame.draw.circle(surface, ACCENT_ORANGE, (int(self.x), int(self.y - self.size - offset)), 3)
-    
-    def draw_dug_tunnels(self, surface: pygame.Surface, mid_y: int) -> None:
-        """Draw the dug tunnel paths"""
-        for grid_x, grid_y in self.dug_tiles:
-            x = grid_x * self.tile_size + self.tile_size // 2
-            y = grid_y * self.tile_size + self.tile_size // 2
-            
-            # Only draw in underground section
-            if y >= mid_y - self.tile_size:
-                # Draw tunnel as a lighter colored circle
-                pygame.draw.circle(surface, (169, 109, 59), (x, y), self.tile_size // 2)
-                pygame.draw.circle(surface, (139, 69, 19), (x, y), self.tile_size // 2, 1)
+    def draw(self, surface: pygame.Surface, camera: Camera3D) -> None:
+        """Draw mole indicator on screen"""
+        # Draw a simple crosshair/indicator in the center
+        center_x = camera.screen_width // 2
+        center_y = camera.screen_height // 2
+        pygame.draw.circle(surface, ACCENT_ORANGE, (center_x, center_y), 5)
+        pygame.draw.line(surface, ACCENT_ORANGE, (center_x - 15, center_y), (center_x + 15, center_y), 1)
+        pygame.draw.line(surface, ACCENT_ORANGE, (center_x, center_y - 15), (center_x, center_y + 15), 1)
 
 
 class Button:
@@ -242,8 +416,24 @@ class MoleGame:
         # Initialize buttons for home screen
         self._init_home_buttons()
         
-        # Initialize player (mole) - start in the bottom left area (underground)
-        self.player = Player(50, SCREEN_HEIGHT - 50)
+        # Initialize 3D camera
+        self.camera = Camera3D(SCREEN_WIDTH, SCREEN_HEIGHT)
+        self.camera.set_position(0, 2, 0)  # Start at eye level
+        self.camera.yaw = 0  # Looking forward
+        self.camera.pitch = 0
+        
+        # Initialize terrain for both layers
+        self.terrain_underground = Terrain3D()
+        self.terrain_underground.generate_terrain("underground")
+        
+        self.terrain_above_ground = Terrain3D()
+        self.terrain_above_ground.generate_terrain("above_ground")
+        
+        # Initialize minimap for opposite layer view
+        self.minimap = Minimap(SCREEN_WIDTH - 210, 10, 200, 150)
+        
+        # Initialize player (mole) - start underground
+        self.player = Player(0, 1, 0)
         
     def _init_home_buttons(self) -> None:
         """Initialize buttons for the home screen"""
@@ -313,8 +503,11 @@ class MoleGame:
         instructions = [
             "OBJECTIVE: Escape from the garden to win!",
             "",
-            "MOVEMENT: Use ARROW KEYS to move underground",
-            "DIG: SPACE BAR to dig and move upward",
+            "3D UNDERGROUND MOVEMENT:",
+            "A / D or ◄ / ►: Move left and right",
+            "W / S or ▲ / ▼: Move forward and backward (deeper/shallower)",
+            "Q: Dig upward toward the surface",
+            "E: Dig downward to find alternative routes",
             "",
             "GAMEPLAY:",
             "- You start underground as a mole in the garden",
@@ -323,14 +516,14 @@ class MoleGame:
             "- If seen by the gardener, you'll be chased - RUN!",
             "- Reach any remaining hole and escape to win",
             "",
-            "SPECIAL EFFECTS: Last hole escape might give you buffs/debuffs",
-            "like slowness or night vision.",
+            "3D MECHANICS: Navigate through 3D underground tunnels!",
+            "You can move forward/backward, left/right, and dig up/down.",
             "",
             "TIPS: Plan your escape route and avoid the gardener!",
         ]
         
         y_offset = 120
-        line_height = 35
+        line_height = 30
         for instruction in instructions:
             if instruction == "":
                 y_offset += line_height * 0.5
@@ -419,10 +612,6 @@ class MoleGame:
                     # Return to home from any screen
                     if self.state != GameState.HOME:
                         self.state = GameState.HOME
-                
-                elif event.key == pygame.K_SPACE and self.state == GameState.PLAYING:
-                    # Start digging
-                    self.player.start_dig()
     
     def update(self) -> None:
         """Update game logic"""
@@ -436,10 +625,26 @@ class MoleGame:
                 self.bg_offset_direction = 1
         
         elif self.state == GameState.PLAYING:
+            # Get appropriate terrain based on current layer
+            current_terrain = self.terrain_underground if self.player.current_layer == "underground" else self.terrain_above_ground
+            
             # Handle player movement based on keyboard input
             keys = pygame.key.get_pressed()
-            self.player.handle_input(keys)
-            self.player.update(SCREEN_WIDTH, SCREEN_HEIGHT)
+            self.player.handle_input(keys, self.camera, current_terrain)
+            self.player.update()
+            
+            # Update camera to follow player
+            self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
+            
+            # Handle arrow keys for camera rotation
+            if keys[pygame.K_LEFT]:
+                self.camera.yaw += 2
+            elif keys[pygame.K_RIGHT]:
+                self.camera.yaw -= 2
+            if keys[pygame.K_UP]:
+                self.camera.pitch = min(self.camera.pitch + 2, 89)
+            elif keys[pygame.K_DOWN]:
+                self.camera.pitch = max(self.camera.pitch - 2, -89)
     
     def draw(self) -> None:
         """Draw the current screen"""
@@ -455,34 +660,51 @@ class MoleGame:
         pygame.display.flip()
     
     def draw_playing_screen(self) -> None:
-        """Draw the main game screen (placeholder)"""
-        self.screen.fill(BG_COLOR)
+        """Draw the main game screen with single-layer 3D view"""
+        self.screen.fill((135, 206, 235))  # Sky blue background
         
-        # Split screen visual
-        mid_y = SCREEN_HEIGHT // 2
+        # Get appropriate terrain based on current layer
+        current_terrain = self.terrain_underground if self.player.current_layer == "underground" else self.terrain_above_ground
         
-        # Above ground section
-        pygame.draw.rect(self.screen, GRASS_GREEN, (0, 0, SCREEN_WIDTH, mid_y))
-        grass_text = self.font_medium.render("ABOVE GROUND - GARDEN VIEW", True, TEXT_WHITE)
-        grass_rect = grass_text.get_rect(center=(SCREEN_WIDTH // 2, 30))
-        self.screen.blit(grass_text, grass_rect)
+        # Draw 3D terrain
+        current_terrain.draw(self.screen, self.camera)
         
-        # Underground section
-        pygame.draw.rect(self.screen, SOIL_BROWN, (0, mid_y, SCREEN_WIDTH, mid_y))
-        soil_text = self.font_medium.render("UNDERGROUND - MOLE VIEW", True, TEXT_WHITE)
-        soil_rect = soil_text.get_rect(center=(SCREEN_WIDTH // 2, mid_y + 30))
-        self.screen.blit(soil_text, soil_rect)
+        # Draw player crosshair
+        self.player.draw(self.screen, self.camera)
         
-        # Draw dug tunnels in underground section
-        self.player.draw_dug_tunnels(self.screen, mid_y)
+        # Draw current layer indicator
+        layer_text = self.font_small.render(
+            f"Layer: {'UNDERGROUND' if self.player.current_layer == 'underground' else 'ABOVE GROUND'}", 
+            True, TEXT_WHITE
+        )
+        layer_rect = layer_text.get_rect(topleft=(10, 10))
+        self.screen.blit(layer_text, layer_rect)
         
-        # Draw the mole in the underground section
-        # Only draw the mole if it's in the underground area
-        if self.player.y >= mid_y - self.player.size:
-            self.player.draw(self.screen, "underground")
+        # Draw position info
+        pos_text = self.font_tiny.render(
+            f"X: {self.player.x:.1f} Y: {self.player.y:.1f} Z: {self.player.z:.1f}", 
+            True, TEXT_WHITE
+        )
+        pos_rect = pos_text.get_rect(topleft=(10, 40))
+        self.screen.blit(pos_text, pos_rect)
         
-        # Controls info
-        controls_text = self.font_tiny.render("ARROW KEYS: Move | SPACE: Dig | ESC: Home", True, TEXT_WHITE)
+        # Draw minimap (opposite layer)
+        self.screen.fill((50, 25, 0), pygame.Rect(SCREEN_WIDTH - 210, 10, 200, 150))
+        pygame.draw.rect(self.screen, (150, 100, 50), pygame.Rect(SCREEN_WIDTH - 210, 10, 200, 150), 2)
+        
+        minimap_text = self.font_tiny.render("Map", True, TEXT_WHITE)
+        self.screen.blit(minimap_text, (SCREEN_WIDTH - 200, 15))
+        
+        # Draw a simple mole indicator on minimap
+        minimap_mole_x = SCREEN_WIDTH - 110
+        minimap_mole_y = 85
+        pygame.draw.circle(self.screen, ACCENT_ORANGE, (int(minimap_mole_x), int(minimap_mole_y)), 4)
+        
+        # Draw controls info
+        controls_text = self.font_tiny.render(
+            "WASD: Move | ◄►: Rotate | ▲▼: Look | Q: DIG UP | E: DIG DOWN | TAB: Layer | ESC: Home", 
+            True, TEXT_WHITE
+        )
         controls_rect = controls_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 20))
         self.screen.blit(controls_text, controls_rect)
     
