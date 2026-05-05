@@ -1,2 +1,0 @@
-# KROT
-python game
