@@ -177,10 +177,35 @@ class Camera3D:
     
     def get_forward_vector(self) -> tuple:
         """Get forward direction vector based on yaw and pitch"""
-        forward_x = math.sin(math.radians(self.yaw))
+        forward_x = math.sin(math.radians(self.yaw)) * math.cos(math.radians(self.pitch))
         forward_y = -math.sin(math.radians(self.pitch))
-        forward_z = math.cos(math.radians(self.yaw))
+        forward_z = math.cos(math.radians(self.yaw)) * math.cos(math.radians(self.pitch))
         return (forward_x, forward_y, forward_z)
+    
+    def raycast(self, max_distance: float = 5.0) -> tuple:
+        """Cast a ray from camera and return blocks along the ray"""
+        forward_x, forward_y, forward_z = self.get_forward_vector()
+        
+        # Step along the ray
+        step_size = 0.1
+        steps = int(max_distance / step_size)
+        seen_blocks = set()
+        
+        for i in range(steps):
+            distance = i * step_size
+            check_x = self.position[0] + forward_x * distance
+            check_y = self.position[1] + forward_y * distance
+            check_z = self.position[2] + forward_z * distance
+            
+            # Round to nearest block position
+            block_x = round(check_x)
+            block_y = round(check_y)
+            block_z = round(check_z)
+            
+            block_key = (block_x, block_y, block_z)
+            if block_key not in seen_blocks:
+                seen_blocks.add(block_key)
+                yield (block_x, block_y, block_z, distance)
     
     def project_point(self, x: float, y: float, z: float) -> tuple:
         """Project 3D point to 2D screen using perspective projection"""
@@ -189,13 +214,19 @@ class Camera3D:
         rel_y = y - self.position[1]
         rel_z = z - self.position[2]
         
-        # Rotate by camera angle
+        # Rotate by yaw (horizontal)
         cos_yaw = math.cos(math.radians(self.yaw))
         sin_yaw = math.sin(math.radians(self.yaw))
         
         rotated_x = rel_x * cos_yaw - rel_z * sin_yaw
         rotated_z = rel_x * sin_yaw + rel_z * cos_yaw
-        rotated_y = rel_y
+        
+        # Rotate by pitch (vertical)
+        cos_pitch = math.cos(math.radians(self.pitch))
+        sin_pitch = math.sin(math.radians(self.pitch))
+        
+        rotated_y = rel_y * cos_pitch - rotated_z * sin_pitch
+        rotated_z = rel_y * sin_pitch + rotated_z * cos_pitch
         
         # Only project points in front of camera
         if rotated_z <= 0.1:
@@ -204,7 +235,7 @@ class Camera3D:
         # Perspective projection
         scale = (self.screen_height / 2) / math.tan(math.radians(self.fov / 2))
         screen_x = (self.screen_width / 2) + (rotated_x / rotated_z) * scale
-        screen_y = (self.screen_height / 2) + (rotated_y / rotated_z) * scale
+        screen_y = (self.screen_height / 2) - (rotated_y / rotated_z) * scale  # Negate Y for correct up/down
         depth = rotated_z
         
         return (screen_x, screen_y, depth)
@@ -214,7 +245,8 @@ class Terrain3D:
     """3D terrain/block system for Minecraft-like rendering"""
     def __init__(self, texture_manager: TextureManager):
         self.texture_manager = texture_manager
-        self.block_size = 1.0  # Size of each block
+        self.block_size = 1.0  # Size of each block in world units
+        self.base_pixel_size = 72  # Base screen size fornear blocks; adjust to make blocks larger
         self.blocks = {}  # Dictionary of block positions: (x, y, z) -> block_type
         self.dug_blocks = set()  # Track which blocks have been dug
         
@@ -287,14 +319,14 @@ class Terrain3D:
     
     def _draw_block(self, surface: pygame.Surface, screen_x: float, screen_y: float, depth: float, block_type: str) -> None:
         """Draw a single block with texture"""
-        # Size decreases with distance
-        size = max(4, 32 / (depth + 0.5))
+        # Size decreases with distance, but block size stays visible.
+        size = max(18, int(self.base_pixel_size / (0.2 + depth * 0.1)))
         
         # Get texture
         texture = self.texture_manager.get_texture(block_type)
         if texture:
             # Scale texture to block size
-            scaled_texture = pygame.transform.scale(texture, (int(size), int(size)))
+            scaled_texture = pygame.transform.scale(texture, (size, size))
             rect = scaled_texture.get_rect(center=(int(screen_x), int(screen_y)))
             surface.blit(scaled_texture, rect)
         else:
@@ -358,34 +390,20 @@ class Player:
                 self.x = new_x
                 self.z = new_z
         
-        # Mouse for camera rotation
-        mouse_buttons = pygame.mouse.get_pressed()
-        mouse_x, mouse_y = pygame.mouse.get_pos()
-        # Camera rotation could be added here if needed
-        
-        # Q for dig up, E for dig down
-        if keys[pygame.K_q]:
-            self.dig_up(terrain)
-        elif keys[pygame.K_e]:
-            self.dig_down(terrain)
+        # SPACE to dig where player is looking
+        if keys[pygame.K_SPACE]:
+            self.dig_forward(camera, terrain)
     
-    def dig_up(self, terrain: Terrain3D) -> None:
-        """Dig upward"""
+    def dig_forward(self, camera: Camera3D, terrain: Terrain3D) -> None:
+        """Dig the block the player is looking at"""
         if self.dig_cooldown <= 0:
-            # Remove block above
-            for dy in range(1, 3):
-                block_x, block_y, block_z = int(self.x), int(self.y) + dy, int(self.z)
-                terrain.remove_block(block_x, block_y, block_z)
-            self.dig_cooldown = 15
-    
-    def dig_down(self, terrain: Terrain3D) -> None:
-        """Dig downward"""
-        if self.dig_cooldown <= 0:
-            # Remove block below
-            for dy in range(1, 3):
-                block_x, block_y, block_z = int(self.x), int(self.y) - dy, int(self.z)
-                terrain.remove_block(block_x, block_y, block_z)
-            self.dig_cooldown = 15
+            # Use camera raycast to find what block to dig
+            for block_x, block_y, block_z, distance in camera.raycast(max_distance=5.0):
+                if terrain.is_block_at(block_x, block_y, block_z):
+                    # Found a block to dig!
+                    terrain.remove_block(block_x, block_y, block_z)
+                    self.dig_cooldown = 15
+                    break
     
     def update(self) -> None:
         """Update player state"""
@@ -558,15 +576,14 @@ class MoleGame:
             "OBJECTIVE: Escape from the garden to win!",
             "",
             "3D FIRST-PERSON CONTROLS:",
-            "MOUSE: Look around (camera rotation)",
+            "MOUSE: Look around (camera rotation) - UP/DOWN to look up and down",
             "WASD: Move forward/backward and strafe",
-            "Q: Dig up (remove blocks above)",
-            "E: Dig down (remove blocks below)",
+            "SPACE: Dig the block you are looking at",
             "TAB: Switch between underground/above-ground",
             "",
             "GAMEPLAY:",
             "- You start underground as a mole in the garden",
-            "- Dig through soil blocks to create tunnels",
+            "- Dig through soil blocks by looking at them and pressing SPACE",
             "- Switch layers to navigate both underground and surface",
             "- Find holes to escape, but the gardener keeps blocking them",
             "- The gardener plants vegetables and can't see behind them",
@@ -574,7 +591,7 @@ class MoleGame:
             "- Reach any remaining hole and escape to win",
             "",
             "3D NAVIGATION: Use mouse to look around like in Minecraft!",
-            "Textures are loaded from game/textures/ folder.",
+            "Dig blocks by looking at them - your reach is about 5 blocks.",
             "",
             "TIPS: Plan your escape route and avoid the gardener!",
         ]
@@ -769,7 +786,7 @@ class MoleGame:
         
         # Draw controls info
         controls_text = self.font_tiny.render(
-            "WASD: Move | ◄►: Rotate | ▲▼: Look | Q: DIG UP | E: DIG DOWN | TAB: Layer | ESC: Home", 
+            "WASD: Move | MOUSE: Look | SPACE: Dig | TAB: Layer | ESC: Home",
             True, TEXT_WHITE
         )
         controls_rect = controls_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 20))
