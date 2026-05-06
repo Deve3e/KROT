@@ -19,6 +19,52 @@ ACCENT_ORANGE = (255, 165, 0)  # Orange for accents
 BUTTON_HOVER = (255, 154, 66)  # Bright gold on hover
 
 
+class TextureManager:
+    """Manages block textures for 3D rendering"""
+    def __init__(self):
+        self.textures = {}  # block_type -> pygame.Surface
+        self.load_textures()
+    
+    def load_textures(self) -> None:
+        """Load textures from game/textures/ folder"""
+        texture_files = {
+            "soil": "game/textures/soil.png",
+            "grass": "game/textures/grass.png", 
+            "plant": "game/textures/plant.png",
+            "sky": "game/textures/sky.png"
+        }
+        
+        for block_type, file_path in texture_files.items():
+            try:
+                texture = pygame.image.load(file_path)
+                texture = texture.convert_alpha()
+                self.textures[block_type] = texture
+                print(f"Loaded texture: {block_type}")
+            except Exception as e:
+                print(f"Failed to load texture {block_type}: {e}")
+                # Create fallback colored surface
+                self.textures[block_type] = self._create_fallback_texture(block_type)
+    
+    def _create_fallback_texture(self, block_type: str) -> pygame.Surface:
+        """Create a fallback colored texture if image loading fails"""
+        surface = pygame.Surface((32, 32))
+        
+        if block_type == "soil":
+            surface.fill((120, 80, 40))
+        elif block_type == "grass":
+            surface.fill((100, 150, 60))
+        elif block_type == "plant":
+            surface.fill((200, 100, 50))
+        else:
+            surface.fill((100, 100, 100))
+        
+        return surface
+    
+    def get_texture(self, block_type: str) -> pygame.Surface:
+        """Get texture for block type"""
+        return self.textures.get(block_type, self.textures.get("soil", None))
+
+
 class ImageBackground:
     """Class to handle image background display"""
     def __init__(self, image_path: str, screen_width: int, screen_height: int):
@@ -166,7 +212,8 @@ class Camera3D:
 
 class Terrain3D:
     """3D terrain/block system for Minecraft-like rendering"""
-    def __init__(self):
+    def __init__(self, texture_manager: TextureManager):
+        self.texture_manager = texture_manager
         self.block_size = 1.0  # Size of each block
         self.blocks = {}  # Dictionary of block positions: (x, y, z) -> block_type
         self.dug_blocks = set()  # Track which blocks have been dug
@@ -239,24 +286,23 @@ class Terrain3D:
                 self._draw_block(surface, screen_x, screen_y, depth, block_type)
     
     def _draw_block(self, surface: pygame.Surface, screen_x: float, screen_y: float, depth: float, block_type: str) -> None:
-        """Draw a single block with perspective scaling"""
+        """Draw a single block with texture"""
         # Size decreases with distance
-        size = max(2, 20 / (depth + 0.5))
+        size = max(4, 32 / (depth + 0.5))
         
-        # Choose color based on block type
-        if block_type == "soil":
-            color = (120, 80, 40)
-        elif block_type == "grass":
-            color = (100, 150, 60)
-        elif block_type == "plant":
-            color = (200, 100, 50)
+        # Get texture
+        texture = self.texture_manager.get_texture(block_type)
+        if texture:
+            # Scale texture to block size
+            scaled_texture = pygame.transform.scale(texture, (int(size), int(size)))
+            rect = scaled_texture.get_rect(center=(int(screen_x), int(screen_y)))
+            surface.blit(scaled_texture, rect)
         else:
-            color = (100, 100, 100)
-        
-        # Draw block as a square
-        rect = pygame.Rect(screen_x - size/2, screen_y - size/2, size, size)
-        pygame.draw.rect(surface, color, rect)
-        pygame.draw.rect(surface, (50, 50, 50), rect, 1)
+            # Fallback to colored rectangle
+            color = (120, 80, 40) if block_type == "soil" else (100, 150, 60)
+            rect = pygame.Rect(screen_x - size/2, screen_y - size/2, size, size)
+            pygame.draw.rect(surface, color, rect)
+            pygame.draw.rect(surface, (50, 50, 50), rect, 1)
 
 
 class Player:
@@ -399,6 +445,9 @@ class MoleGame:
         self.font_small = pygame.font.Font(None, 32)
         self.font_tiny = pygame.font.Font(None, 24)
         
+        # Initialize texture manager
+        self.texture_manager = TextureManager()
+        
         # Try to load Supply Center font for title, fallback to default
         try:
             self.font_title = pygame.font.SysFont("Supply Center", 130, bold=True)
@@ -423,10 +472,10 @@ class MoleGame:
         self.camera.pitch = 0
         
         # Initialize terrain for both layers
-        self.terrain_underground = Terrain3D()
+        self.terrain_underground = Terrain3D(self.texture_manager)
         self.terrain_underground.generate_terrain("underground")
         
-        self.terrain_above_ground = Terrain3D()
+        self.terrain_above_ground = Terrain3D(self.texture_manager)
         self.terrain_above_ground.generate_terrain("above_ground")
         
         # Initialize minimap for opposite layer view
@@ -434,6 +483,11 @@ class MoleGame:
         
         # Initialize player (mole) - start underground
         self.player = Player(0, 1, 0)
+        
+        # Mouse look variables
+        self.mouse_sensitivity = 0.2
+        pygame.mouse.set_visible(False)
+        pygame.event.set_grab(True)
         
     def _init_home_buttons(self) -> None:
         """Initialize buttons for the home screen"""
@@ -503,21 +557,24 @@ class MoleGame:
         instructions = [
             "OBJECTIVE: Escape from the garden to win!",
             "",
-            "3D UNDERGROUND MOVEMENT:",
-            "A / D or ◄ / ►: Move left and right",
-            "W / S or ▲ / ▼: Move forward and backward (deeper/shallower)",
-            "Q: Dig upward toward the surface",
-            "E: Dig downward to find alternative routes",
+            "3D FIRST-PERSON CONTROLS:",
+            "MOUSE: Look around (camera rotation)",
+            "WASD: Move forward/backward and strafe",
+            "Q: Dig up (remove blocks above)",
+            "E: Dig down (remove blocks below)",
+            "TAB: Switch between underground/above-ground",
             "",
             "GAMEPLAY:",
             "- You start underground as a mole in the garden",
+            "- Dig through soil blocks to create tunnels",
+            "- Switch layers to navigate both underground and surface",
             "- Find holes to escape, but the gardener keeps blocking them",
             "- The gardener plants vegetables and can't see behind them",
             "- If seen by the gardener, you'll be chased - RUN!",
             "- Reach any remaining hole and escape to win",
             "",
-            "3D MECHANICS: Navigate through 3D underground tunnels!",
-            "You can move forward/backward, left/right, and dig up/down.",
+            "3D NAVIGATION: Use mouse to look around like in Minecraft!",
+            "Textures are loaded from game/textures/ folder.",
             "",
             "TIPS: Plan your escape route and avoid the gardener!",
         ]
@@ -575,6 +632,13 @@ class MoleGame:
             if event.type == pygame.QUIT:
                 self.running = False
             
+            elif event.type == pygame.MOUSEMOTION and self.state == GameState.PLAYING:
+                # Mouse look for camera
+                mouse_x, mouse_y = event.rel
+                self.camera.yaw += mouse_x * self.mouse_sensitivity
+                self.camera.pitch -= mouse_y * self.mouse_sensitivity
+                self.camera.pitch = max(-89, min(89, self.camera.pitch))  # Clamp pitch
+            
             elif event.type == pygame.MOUSEMOTION:
                 mouse_pos = event.pos
                 
@@ -590,6 +654,8 @@ class MoleGame:
                 if self.state == GameState.HOME:
                     if self.play_button.is_clicked(mouse_pos):
                         self.state = GameState.PLAYING
+                        pygame.mouse.set_visible(False)
+                        pygame.event.set_grab(True)
                     elif self.instructions_button.is_clicked(mouse_pos):
                         self.state = GameState.INSTRUCTIONS
                     elif self.settings_button.is_clicked(mouse_pos):
@@ -612,6 +678,17 @@ class MoleGame:
                     # Return to home from any screen
                     if self.state != GameState.HOME:
                         self.state = GameState.HOME
+                        pygame.mouse.set_visible(True)
+                        pygame.event.set_grab(False)
+                
+                elif event.key == pygame.K_TAB and self.state == GameState.PLAYING:
+                    # Switch layers
+                    if self.player.current_layer == "underground":
+                        self.player.current_layer = "above_ground"
+                        self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
+                    else:
+                        self.player.current_layer = "underground"
+                        self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
     
     def update(self) -> None:
         """Update game logic"""
@@ -635,16 +712,6 @@ class MoleGame:
             
             # Update camera to follow player
             self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
-            
-            # Handle arrow keys for camera rotation
-            if keys[pygame.K_LEFT]:
-                self.camera.yaw += 2
-            elif keys[pygame.K_RIGHT]:
-                self.camera.yaw -= 2
-            if keys[pygame.K_UP]:
-                self.camera.pitch = min(self.camera.pitch + 2, 89)
-            elif keys[pygame.K_DOWN]:
-                self.camera.pitch = max(self.camera.pitch - 2, -89)
     
     def draw(self) -> None:
         """Draw the current screen"""
