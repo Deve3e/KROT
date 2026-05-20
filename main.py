@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 import pygame
 import sys
 from enum import Enum
@@ -158,12 +159,45 @@ class Minimap:
 import math
 
 
+def clip_face_against_near_plane(vertices, near=0.05):
+    """
+    Clip a polygon represented by a list of 3D vertices in camera space
+    against the near plane z = near.
+    """
+    clipped = []
+    n = len(vertices)
+    if n == 0:
+        return []
+    
+    for i in range(n):
+        p1 = vertices[i]
+        p2 = vertices[(i + 1) % n]
+        
+        p1_in = p1[2] >= near
+        p2_in = p2[2] >= near
+        
+        if p1_in:
+            clipped.append(p1)
+            
+        if p1_in != p2_in:
+            # Intersection point: calculate t parameter
+            t = (near - p1[2]) / (p2[2] - p1[2])
+            x = p1[0] + t * (p2[0] - p1[0])
+            y = p1[1] + t * (p2[1] - p1[1])
+            z = near
+            clipped.append((x, y, z))
+            
+    return clipped
+
+
+
 class Camera3D:
     """First-person 3D camera (Minecraft-style)"""
     def __init__(self, screen_width: int, screen_height: int):
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.fov = 90  # Field of view
+        self.scale = (self.screen_height / 2) / math.tan(math.radians(self.fov / 2))
         self.near = 0.1
         self.far = 1000
         self.aspect_ratio = screen_width / screen_height
@@ -178,7 +212,7 @@ class Camera3D:
     def get_forward_vector(self) -> tuple:
         """Get forward direction vector based on yaw and pitch"""
         forward_x = math.sin(math.radians(self.yaw)) * math.cos(math.radians(self.pitch))
-        forward_y = -math.sin(math.radians(self.pitch))
+        forward_y = math.sin(math.radians(self.pitch))
         forward_z = math.cos(math.radians(self.yaw)) * math.cos(math.radians(self.pitch))
         return (forward_x, forward_y, forward_z)
     
@@ -207,9 +241,8 @@ class Camera3D:
                 seen_blocks.add(block_key)
                 yield (block_x, block_y, block_z, distance)
     
-    def project_point(self, x: float, y: float, z: float) -> tuple:
-        """Project 3D point to 2D screen using perspective projection"""
-        # Translate point relative to camera
+    def world_to_camera_space(self, x: float, y: float, z: float) -> tuple:
+        """Transform 3D point from world space to camera space (before projection)"""
         rel_x = x - self.position[0]
         rel_y = y - self.position[1]
         rel_z = z - self.position[2]
@@ -225,18 +258,24 @@ class Camera3D:
         cos_pitch = math.cos(math.radians(self.pitch))
         sin_pitch = math.sin(math.radians(self.pitch))
         
-        rotated_y = rel_y * cos_pitch - rotated_z * sin_pitch
-        rotated_z = rel_y * sin_pitch + rotated_z * cos_pitch
+        cam_x = rotated_x
+        cam_y = rel_y * cos_pitch - rotated_z * sin_pitch
+        cam_z = rel_y * sin_pitch + rotated_z * cos_pitch
+        
+        return (cam_x, cam_y, cam_z)
+
+    def project_point(self, x: float, y: float, z: float) -> tuple:
+        """Project 3D point to 2D screen using perspective projection"""
+        cam_x, cam_y, cam_z = self.world_to_camera_space(x, y, z)
         
         # Only project points in front of camera
-        if rotated_z <= 0.1:
+        if cam_z <= 0.1:
             return None
         
         # Perspective projection
-        scale = (self.screen_height / 2) / math.tan(math.radians(self.fov / 2))
-        screen_x = (self.screen_width / 2) + (rotated_x / rotated_z) * scale
-        screen_y = (self.screen_height / 2) - (rotated_y / rotated_z) * scale  # Negate Y for correct up/down
-        depth = rotated_z
+        screen_x = (self.screen_width / 2) + (cam_x / cam_z) * self.scale
+        screen_y = (self.screen_height / 2) - (cam_y / cam_z) * self.scale  # Negate Y for correct up/down
+        depth = cam_z
         
         return (screen_x, screen_y, depth)
 
@@ -249,6 +288,7 @@ class Terrain3D:
         self.base_pixel_size = 72  # Base screen size fornear blocks; adjust to make blocks larger
         self.blocks = {}  # Dictionary of block positions: (x, y, z) -> block_type
         self.dug_blocks = set()  # Track which blocks have been dug
+        self.exposed_blocks = {}  # Dictionary of exposed block positions: (x, y, z) -> block_type
         
     def add_block(self, x: int, y: int, z: int, block_type: str = "soil") -> None:
         """Add a block at position"""
@@ -260,10 +300,39 @@ class Terrain3D:
         self.dug_blocks.add((x, y, z))
         if (x, y, z) in self.blocks:
             del self.blocks[(x, y, z)]
+        if (x, y, z) in self.exposed_blocks:
+            del self.exposed_blocks[(x, y, z)]
+            
+        # Update neighbor blocks to be exposed now that this block is empty space
+        neighbors = [
+            (x + 1, y, z),
+            (x - 1, y, z),
+            (x, y + 1, z),
+            (x, y - 1, z),
+            (x, y, z + 1),
+            (x, y, z - 1)
+        ]
+        for nx, ny, nz in neighbors:
+            if (nx, ny, nz) in self.blocks:
+                self.exposed_blocks[(nx, ny, nz)] = self.blocks[(nx, ny, nz)]
     
     def is_block_at(self, x: int, y: int, z: int) -> bool:
         """Check if there's a solid block at position"""
         return (x, y, z) in self.blocks and (x, y, z) not in self.dug_blocks
+        
+    def generate_exposed_blocks(self) -> None:
+        """Find and store all blocks that are adjacent to an air block"""
+        self.exposed_blocks.clear()
+        for (x, y, z), block_type in self.blocks.items():
+            if (
+                (x + 1, y, z) not in self.blocks or
+                (x - 1, y, z) not in self.blocks or
+                (x, y + 1, z) not in self.blocks or
+                (x, y - 1, z) not in self.blocks or
+                (x, y, z + 1) not in self.blocks or
+                (x, y, z - 1) not in self.blocks
+            ):
+                self.exposed_blocks[(x, y, z)] = block_type
     
     def generate_terrain(self, layer: str = "underground") -> None:
         """Generate terrain for a layer"""
@@ -297,44 +366,192 @@ class Terrain3D:
             self.add_block(-8, 0, 8, "plant")
             self.add_block(8, 0, -8, "plant")
             self.add_block(8, 0, 8, "plant")
+            
+        self.generate_exposed_blocks()
     
     def draw(self, surface: pygame.Surface, camera: Camera3D) -> None:
-        """Draw all visible blocks"""
-        # Collect blocks with depth for sorting
+        """Draw all visible blocks with true 3D voxel rendering (flat shaded, outlines, culled)"""
+        cam_pos = camera.position
+        
+        # 1. Filter blocks by distance
+        MAX_RENDER_DISTANCE = 14
+        max_dist_sq = MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE
+        
+        # Pre-compute trigonometric components to optimize camera space transformations
+        cos_yaw = math.cos(math.radians(camera.yaw))
+        sin_yaw = math.sin(math.radians(camera.yaw))
+        cos_pitch = math.cos(math.radians(camera.pitch))
+        sin_pitch = math.sin(math.radians(camera.pitch))
+        
         visible_blocks = []
+        for (bx, by, bz), block_type in self.exposed_blocks.items():
+            dx = bx - cam_pos[0]
+            dy = by - cam_pos[1]
+            dz = bz - cam_pos[2]
+            dist_sq = dx*dx + dy*dy + dz*dz
+            
+            if dist_sq > max_dist_sq:
+                continue
+                
+            # 2. Behind-camera check (frustum culling along forward axis in camera space)
+            # Transform the block center to camera space z (cam_z)
+            rotated_z = dx * sin_yaw + dz * cos_yaw
+            cam_z = dy * sin_pitch + rotated_z * cos_pitch
+            
+            # Since the block radius is 0.5 * sqrt(3) ~= 0.86, if center depth is < -1.0,
+            # the entire block is behind the near clipping plane (z = 0.05).
+            if cam_z < -1.0:
+                continue
+                
+            visible_blocks.append((dist_sq, (bx, by, bz), block_type))
+            
+        # 3. Sort back-to-front (largest distance first) for Painter's Algorithm
+        visible_blocks.sort(key=lambda x: x[0], reverse=True)
         
-        for (x, y, z), block_type in self.blocks.items():
-            proj = camera.project_point(x, y, z)
-            if proj is not None:
-                screen_x, screen_y, depth = proj
-                visible_blocks.append(((screen_x, screen_y, depth), block_type, (x, y, z)))
-        
-        # Sort by depth (back to front) for proper occlusion
-        visible_blocks.sort(key=lambda item: item[0][2], reverse=True)
+        # 4. Define local vertex coordinates and face structures
+        r = 0.5
+        # The 6 faces of a block:
+        # (face_name, neighbor_offset, vertex_indices, shading_factor, is_top_bottom)
+        faces = [
+            ("top",    (0, 1, 0),  [3, 2, 6, 7], 1.0, True),
+            ("bottom", (0, -1, 0), [0, 1, 5, 4], 0.4, True),
+            ("left",   (-1, 0, 0), [0, 4, 7, 3], 0.6, False),
+            ("right",  (1, 0, 0),  [5, 1, 2, 6], 0.6, False),
+            ("back",   (0, 0, -1), [1, 0, 3, 2], 0.8, False),
+            ("front",  (0, 0, 1),  [4, 5, 6, 7], 0.8, False),
+        ]
         
         # Draw blocks
-        for (screen_x, screen_y, depth), block_type, (world_x, world_y, world_z) in visible_blocks:
-            if -100 < screen_x < camera.screen_width + 100 and -100 < screen_y < camera.screen_height + 100:
-                self._draw_block(surface, screen_x, screen_y, depth, block_type)
-    
-    def _draw_block(self, surface: pygame.Surface, screen_x: float, screen_y: float, depth: float, block_type: str) -> None:
-        """Draw a single block with texture"""
-        # Size decreases with distance, but block size stays visible.
-        size = max(18, int(self.base_pixel_size / (0.2 + depth * 0.1)))
-        
-        # Get texture
-        texture = self.texture_manager.get_texture(block_type)
-        if texture:
-            # Scale texture to block size
-            scaled_texture = pygame.transform.scale(texture, (size, size))
-            rect = scaled_texture.get_rect(center=(int(screen_x), int(screen_y)))
-            surface.blit(scaled_texture, rect)
-        else:
-            # Fallback to colored rectangle
-            color = (120, 80, 40) if block_type == "soil" else (100, 150, 60)
-            rect = pygame.Rect(screen_x - size/2, screen_y - size/2, size, size)
-            pygame.draw.rect(surface, color, rect)
-            pygame.draw.rect(surface, (50, 50, 50), rect, 1)
+        for dist_sq, (bx, by, bz), block_type in visible_blocks:
+            # Determine which faces of this block are visible
+            visible_faces = []
+            for face_name, offset, indices, shading, is_top_bottom in faces:
+                # A. Neighbor check (adjacent face culling)
+                nx = bx + offset[0]
+                ny = by + offset[1]
+                nz = bz + offset[2]
+                if (nx, ny, nz) in self.blocks:
+                    continue
+                    
+                # B. Camera side check (backface culling)
+                cam_side_ok = False
+                if face_name == "top":
+                    cam_side_ok = cam_pos[1] > by + 0.5
+                elif face_name == "bottom":
+                    cam_side_ok = cam_pos[1] < by - 0.5
+                elif face_name == "left":
+                    cam_side_ok = cam_pos[0] < bx - 0.5
+                elif face_name == "right":
+                    cam_side_ok = cam_pos[0] > bx + 0.5
+                elif face_name == "back":
+                    cam_side_ok = cam_pos[2] < bz - 0.5
+                elif face_name == "front":
+                    cam_side_ok = cam_pos[2] > bz + 0.5
+                    
+                if not cam_side_ok:
+                    continue
+                    
+                visible_faces.append((face_name, indices, shading, is_top_bottom))
+                
+            if not visible_faces:
+                continue
+                
+            # Define 8 vertices of the block in world space
+            v0 = (bx - r, by - r, bz - r)
+            v1 = (bx + r, by - r, bz - r)
+            v2 = (bx + r, by + r, bz - r)
+            v3 = (bx - r, by + r, bz - r)
+            v4 = (bx - r, by - r, bz + r)
+            v5 = (bx + r, by - r, bz + r)
+            v6 = (bx + r, by + r, bz + r)
+            v7 = (bx - r, by + r, bz + r)
+            world_vertices = [v0, v1, v2, v3, v4, v5, v6, v7]
+            
+            # Transform all 8 vertices to camera space once per block
+            cam_vertices = [camera.world_to_camera_space(*v) for v in world_vertices]
+            
+            # Draw each visible face
+            for face_name, indices, shading, is_top_bottom in visible_faces:
+                face_cam_vertices = [cam_vertices[idx] for idx in indices]
+                
+                # Clip against near plane
+                clipped = clip_face_against_near_plane(face_cam_vertices, near=0.05)
+                if len(clipped) < 3:
+                    continue
+                    
+                # Project clipped vertices to 2D screen
+                projected = []
+                for cx, cy, cz in clipped:
+                    sx = (camera.screen_width / 2) + (cx / cz) * camera.scale
+                    sy = (camera.screen_height / 2) - (cy / cz) * camera.scale
+                    projected.append((sx, sy))
+                    
+                # Base colors:
+                # soil: (139, 69, 19)
+                # grass top: (76, 175, 80)
+                # plant top: (76, 175, 80), sides: (200, 100, 50)
+                if block_type == "grass":
+                    if face_name == "top":
+                        base_color = (76, 175, 80)
+                    else:
+                        base_color = (139, 69, 19)
+                elif block_type == "plant":
+                    if face_name == "top":
+                        base_color = (76, 175, 80)
+                    else:
+                        base_color = (200, 100, 50)
+                else:  # soil
+                    base_color = (139, 69, 19)
+                    
+                # Apply shading
+                shaded_color = (
+                    int(base_color[0] * shading),
+                    int(base_color[1] * shading),
+                    int(base_color[2] * shading)
+                )
+                
+                # Draw main face polygon
+                pygame.draw.polygon(surface, shaded_color, projected)
+                
+                # For grass side faces, draw a green top trim
+                if block_type == "grass" and not is_top_bottom:
+                    p0, p1, p2, p3 = face_cam_vertices
+                    
+                    # Top trim is 25% height of the block face (from Y = by+0.25 to by+0.5)
+                    # Interpolate bottom edge of the trim at 75% height up (0.25 * bottom + 0.75 * top)
+                    t0 = (
+                        0.25 * p0[0] + 0.75 * p3[0],
+                        0.25 * p0[1] + 0.75 * p3[1],
+                        0.25 * p0[2] + 0.75 * p3[2]
+                    )
+                    t1 = (
+                        0.25 * p1[0] + 0.75 * p2[0],
+                        0.25 * p1[1] + 0.75 * p2[1],
+                        0.25 * p1[2] + 0.75 * p2[2]
+                    )
+                    t2 = p2
+                    t3 = p3
+                    
+                    trim_cam_vertices = [t0, t1, t2, t3]
+                    clipped_trim = clip_face_against_near_plane(trim_cam_vertices, near=0.05)
+                    if len(clipped_trim) >= 3:
+                        projected_trim = []
+                        for cx, cy, cz in clipped_trim:
+                            sx = (camera.screen_width / 2) + (cx / cz) * camera.scale
+                            sy = (camera.screen_height / 2) - (cy / cz) * camera.scale
+                            projected_trim.append((sx, sy))
+                            
+                        trim_base_color = (76, 175, 80)
+                        shaded_trim_color = (
+                            int(trim_base_color[0] * shading),
+                            int(trim_base_color[1] * shading),
+                            int(trim_base_color[2] * shading)
+                        )
+                        pygame.draw.polygon(surface, shaded_trim_color, projected_trim)
+                        
+                # Draw dark outline around face edges
+                outline_color = (25, 20, 15)
+                pygame.draw.polygon(surface, outline_color, projected, 2)
 
 
 class Player:
@@ -366,13 +583,13 @@ class Player:
         if keys[pygame.K_w]:
             new_x = self.x + forward_x * self.speed
             new_z = self.z + forward_z * self.speed
-            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+            if not terrain.is_block_at(round(new_x), round(self.y), round(new_z)):
                 self.x = new_x
                 self.z = new_z
         elif keys[pygame.K_s]:
             new_x = self.x - forward_x * self.speed
             new_z = self.z - forward_z * self.speed
-            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+            if not terrain.is_block_at(round(new_x), round(self.y), round(new_z)):
                 self.x = new_x
                 self.z = new_z
         
@@ -380,15 +597,25 @@ class Player:
         if keys[pygame.K_a]:
             new_x = self.x + right_x * self.speed
             new_z = self.z + right_z * self.speed
-            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+            if not terrain.is_block_at(round(new_x), round(self.y), round(new_z)):
                 self.x = new_x
                 self.z = new_z
         elif keys[pygame.K_d]:
             new_x = self.x - right_x * self.speed
             new_z = self.z - right_z * self.speed
-            if not terrain.is_block_at(int(new_x), int(self.y), int(new_z)):
+            if not terrain.is_block_at(round(new_x), round(self.y), round(new_z)):
                 self.x = new_x
                 self.z = new_z
+                
+        # Q/E for moving up/down
+        if keys[pygame.K_q]:
+            new_y = self.y + self.speed
+            if not terrain.is_block_at(round(self.x), round(new_y), round(self.z)):
+                self.y = new_y
+        if keys[pygame.K_e]:
+            new_y = self.y - self.speed
+            if not terrain.is_block_at(round(self.x), round(new_y), round(self.z)):
+                self.y = new_y
         
         # SPACE to dig where player is looking
         if keys[pygame.K_SPACE]:
@@ -578,6 +805,7 @@ class MoleGame:
             "3D FIRST-PERSON CONTROLS:",
             "MOUSE: Look around (camera rotation) - UP/DOWN to look up and down",
             "WASD: Move forward/backward and strafe",
+            "Q/E: Move up/down",
             "SPACE: Dig the block you are looking at",
             "TAB: Switch between underground/above-ground",
             "",
@@ -786,7 +1014,7 @@ class MoleGame:
         
         # Draw controls info
         controls_text = self.font_tiny.render(
-            "WASD: Move | MOUSE: Look | SPACE: Dig | TAB: Layer | ESC: Home",
+            "WASD/QE: Move | MOUSE: Look | SPACE: Dig | TAB: Layer | ESC: Home",
             True, TEXT_WHITE
         )
         controls_rect = controls_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 20))
