@@ -570,6 +570,10 @@ class Player:
         self.dig_target_y = start_y
         self.current_layer = "underground"  # underground or above_ground
         self.dug_tunnels = set()  # Track dug positions
+        
+        # Gravity variables
+        self.vy = 0.0
+        self.is_on_ground = False
     
     def handle_input(self, keys, camera: Camera3D, terrain: Terrain3D) -> None:
         """Handle keyboard input for 3D movement (Minecraft-style)"""
