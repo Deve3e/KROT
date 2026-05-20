@@ -611,19 +611,10 @@ class Player:
                 self.x = new_x
                 self.z = new_z
                 
-        # Q/E for moving up/down
-        if keys[pygame.K_q]:
-            new_y = self.y + self.speed
-            if not terrain.is_block_at(round(self.x), round(new_y), round(self.z)):
-                self.y = new_y
-        if keys[pygame.K_e]:
-            new_y = self.y - self.speed
-            if not terrain.is_block_at(round(self.x), round(new_y), round(self.z)):
-                self.y = new_y
-        
-        # SPACE to dig where player is looking
-        if keys[pygame.K_SPACE]:
-            self.dig_forward(camera, terrain)
+        # SPACE for jumping
+        if keys[pygame.K_SPACE] and self.is_on_ground:
+            self.vy = 0.18
+            self.is_on_ground = False
     
     def dig_forward(self, camera: Camera3D, terrain: Terrain3D) -> None:
         """Dig the block the player is looking at"""
@@ -636,10 +627,49 @@ class Player:
                     self.dig_cooldown = 15
                     break
     
-    def update(self) -> None:
-        """Update player state"""
+    def update(self, terrain: Terrain3D) -> None:
+        """Update player state with gravity and collisions"""
         if self.dig_cooldown > 0:
             self.dig_cooldown -= 1
+            
+        # Apply gravity
+        GRAVITY = -0.01
+        TERMINAL_VELOCITY = -0.3
+        
+        # Check if we are on ground by checking block directly below
+        on_ground = terrain.is_block_at(round(self.x), round(self.y - 0.6), round(self.z))
+        
+        if on_ground:
+            self.is_on_ground = True
+            # If falling/standing, align and reset velocity
+            if self.vy <= 0:
+                self.vy = 0.0
+                self.y = float(round(self.y))
+        else:
+            self.is_on_ground = False
+            self.vy += GRAVITY
+            if self.vy < TERMINAL_VELOCITY:
+                self.vy = TERMINAL_VELOCITY
+                
+            new_y = self.y + self.vy
+            
+            # Vertical movement collision checks
+            if self.vy < 0:
+                # Falling: check if block is at round(new_y - 0.1)
+                if terrain.is_block_at(round(self.x), round(new_y - 0.1), round(self.z)):
+                    self.y = float(round(new_y - 0.1) + 1)
+                    self.vy = 0.0
+                    self.is_on_ground = True
+                else:
+                    self.y = new_y
+            elif self.vy > 0:
+                # Jumping: check if block is at round(new_y + 0.1)
+                if terrain.is_block_at(round(self.x), round(new_y + 0.1), round(self.z)):
+                    # Ceiling hit!
+                    self.y = float(round(new_y + 0.1) - 1)
+                    self.vy = 0.0
+                else:
+                    self.y = new_y
     
     def draw(self, surface: pygame.Surface, camera: Camera3D) -> None:
         """Draw mole indicator on screen"""
@@ -735,8 +765,8 @@ class MoleGame:
         
         # Mouse look variables
         self.mouse_sensitivity = 0.2
-        pygame.mouse.set_visible(False)
-        pygame.event.set_grab(True)
+        pygame.mouse.set_visible(True)
+        pygame.event.set_grab(False)
         
     def _init_home_buttons(self) -> None:
         """Initialize buttons for the home screen"""
@@ -809,13 +839,13 @@ class MoleGame:
             "3D FIRST-PERSON CONTROLS:",
             "MOUSE: Look around (camera rotation) - UP/DOWN to look up and down",
             "WASD: Move forward/backward and strafe",
-            "Q/E: Move up/down",
-            "SPACE: Dig the block you are looking at",
+            "SPACE: Jump",
+            "LEFT CLICK: Dig the block you are looking at",
             "TAB: Switch between underground/above-ground",
             "",
             "GAMEPLAY:",
             "- You start underground as a mole in the garden",
-            "- Dig through soil blocks by looking at them and pressing SPACE",
+            "- Dig through soil blocks by looking at them and LEFT CLICKING",
             "- Switch layers to navigate both underground and surface",
             "- Find holes to escape, but the gardener keeps blocking them",
             "- The gardener plants vegetables and can't see behind them",
@@ -912,6 +942,11 @@ class MoleGame:
                     elif self.quit_button.is_clicked(mouse_pos):
                         self.running = False
                 
+                elif self.state == GameState.PLAYING:
+                    if event.button == 1:  # Left click to dig
+                        current_terrain = self.terrain_underground if self.player.current_layer == "underground" else self.terrain_above_ground
+                        self.player.dig_forward(self.camera, current_terrain)
+                
                 elif self.state == GameState.INSTRUCTIONS:
                     back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
                     if back_button.is_clicked(mouse_pos):
@@ -934,10 +969,10 @@ class MoleGame:
                     # Switch layers
                     if self.player.current_layer == "underground":
                         self.player.current_layer = "above_ground"
-                        self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
+                        self.camera.set_position(self.player.x, self.player.y, self.player.z)
                     else:
                         self.player.current_layer = "underground"
-                        self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
+                        self.camera.set_position(self.player.x, self.player.y, self.player.z)
     
     def update(self) -> None:
         """Update game logic"""
@@ -957,10 +992,10 @@ class MoleGame:
             # Handle player movement based on keyboard input
             keys = pygame.key.get_pressed()
             self.player.handle_input(keys, self.camera, current_terrain)
-            self.player.update()
+            self.player.update(current_terrain)
             
             # Update camera to follow player
-            self.camera.set_position(self.player.x, self.player.y + 1, self.player.z)
+            self.camera.set_position(self.player.x, self.player.y, self.player.z)
     
     def draw(self) -> None:
         """Draw the current screen"""
@@ -1018,7 +1053,7 @@ class MoleGame:
         
         # Draw controls info
         controls_text = self.font_tiny.render(
-            "WASD/QE: Move | MOUSE: Look | SPACE: Dig | TAB: Layer | ESC: Home",
+            "WASD: Move | MOUSE: Look | SPACE: Jump | LEFT CLICK: Dig | TAB: Layer | ESC: Home",
             True, TEXT_WHITE
         )
         controls_rect = controls_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 20))
