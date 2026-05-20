@@ -27,12 +27,12 @@ class TextureManager:
         self.load_textures()
     
     def load_textures(self) -> None:
-        """Load textures from game/textures/ folder"""
+        """Load textures from textures/ folder"""
         texture_files = {
-            "soil": "game/textures/soil.png",
-            "grass": "game/textures/grass.png", 
-            "plant": "game/textures/plant.png",
-            "sky": "game/textures/sky.png"
+            "soil": "textures/soil.png",
+            "grass": "textures/grass.png", 
+            "plant": "textures/plant.png",
+            "sky": "textures/sky.png"
         }
         
         for block_type, file_path in texture_files.items():
@@ -734,7 +734,7 @@ class MoleGame:
             self.font_title = self.font_large
         
         # Initialize image background (looks for "bg_image.png" in the game/addinfo folder)
-        self.bg_image = ImageBackground("game/addinfo/bg_image.png", SCREEN_WIDTH, SCREEN_HEIGHT)
+        self.bg_image = ImageBackground("addinfo/bg_image.png", SCREEN_WIDTH, SCREEN_HEIGHT)
         self.bg_offset = 0.0
         self.bg_offset_direction = 1
         self.bg_offset_min = -50
