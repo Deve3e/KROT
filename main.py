@@ -563,13 +563,14 @@ class Player:
         self.z = start_z
         
         self.size = size
-        self.speed = 0.2
+        self.speed = 0.12
         self.dig_speed = 0.3
         self.is_digging = False
         self.dig_cooldown = 0
         self.dig_target_y = start_y
         self.current_layer = "underground"  # underground or above_ground
         self.dug_tunnels = set()  # Track dug positions
+        self.eye_height = 0.6
         
         # Gravity variables
         self.vy = 0.0
@@ -639,12 +640,11 @@ class Player:
         # Check if we are on ground by checking block directly below
         on_ground = terrain.is_block_at(round(self.x), round(self.y - 0.6), round(self.z))
         
-        if on_ground:
+        if on_ground and self.vy <= 0:
             self.is_on_ground = True
             # If falling/standing, align and reset velocity
-            if self.vy <= 0:
-                self.vy = 0.0
-                self.y = float(round(self.y))
+            self.vy = 0.0
+            self.y = float(round(self.y))
         else:
             self.is_on_ground = False
             self.vy += GRAVITY
@@ -969,10 +969,10 @@ class MoleGame:
                     # Switch layers
                     if self.player.current_layer == "underground":
                         self.player.current_layer = "above_ground"
-                        self.camera.set_position(self.player.x, self.player.y, self.player.z)
+                        self.camera.set_position(self.player.x, self.player.y + self.player.eye_height, self.player.z)
                     else:
                         self.player.current_layer = "underground"
-                        self.camera.set_position(self.player.x, self.player.y, self.player.z)
+                        self.camera.set_position(self.player.x, self.player.y + self.player.eye_height, self.player.z)
     
     def update(self) -> None:
         """Update game logic"""
@@ -995,7 +995,7 @@ class MoleGame:
             self.player.update(current_terrain)
             
             # Update camera to follow player
-            self.camera.set_position(self.player.x, self.player.y, self.player.z)
+            self.camera.set_position(self.player.x, self.player.y + self.player.eye_height, self.player.z)
     
     def draw(self) -> None:
         """Draw the current screen"""
