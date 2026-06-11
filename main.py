@@ -113,46 +113,101 @@ class Minimap:
         self.y = y
         self.width = width
         self.height = height
-        self.zoom = 0.5  # Scale factor for world coordinates
-        self.center_x = x + width // 2
-        self.center_y = y + height // 2
         
     def world_to_minimap(self, world_x: float, world_z: float) -> tuple:
-        """Convert 3D world coordinates (x, z) to 2D minimap coordinates"""
-        map_x = self.center_x + (world_x * self.zoom)
-        map_y = self.center_y + (world_z * self.zoom)
+        """Map 3D world coordinates (x, z) to 2D minimap coordinates fit to the whole platform"""
+        border = 10
+        usable_w = self.width - 2 * border
+        usable_h = self.height - 2 * border
+        
+        # Norm coordinates from -20..20 to 0..1
+        norm_x = (world_x + 20) / 40.0
+        norm_z = (world_z + 20) / 40.0
+        
+        map_x = self.x + border + norm_x * usable_w
+        map_y = self.y + border + norm_z * usable_h
         return (map_x, map_y)
     
-    def draw(self, surface: pygame.Surface, player: 'Player') -> None:
-        """Draw the minimap"""
+    def draw(self, surface: pygame.Surface, player: 'Player', terrain: 'Terrain3D', camera: 'Camera3D') -> None:
+        """Draw the minimap top-down view"""
+        # Determine if we are at the surface level
+        on_surface = player.y >= 9.5
+        
+        if on_surface:
+            # Surface map colors (Green theme)
+            bg_color = (60, 120, 50)       # Grass green background
+            border_color = (100, 180, 80)   # Lighter green border
+            outline_color = (40, 80, 30)    # Dark green platform outline
+        else:
+            # Underground map colors (Brown theme)
+            bg_color = (50, 25, 0)         # Soil brown background
+            border_color = (150, 100, 50)   # Lighter brown border
+            outline_color = (80, 40, 10)    # Dark brown platform outline
+            
         # Draw background
-        pygame.draw.rect(surface, (50, 25, 0), (self.x, self.y, self.width, self.height))
-        pygame.draw.rect(surface, (150, 100, 50), (self.x, self.y, self.width, self.height), 2)
+        pygame.draw.rect(surface, bg_color, (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(surface, border_color, (self.x, self.y, self.width, self.height), 2)
         
         # Draw title
         font_small = pygame.font.Font(None, 16)
         title = font_small.render("Map", True, TEXT_WHITE)
         surface.blit(title, (self.x + 5, self.y + 2))
         
-        # Draw dug tunnels
-        for (grid_x, grid_y, grid_z) in player.dug_positions:
-            world_x = grid_x * player.tile_size
-            world_z = grid_z * player.tile_size
-            map_x, map_y = self.world_to_minimap(world_x, world_z)
-            
-            # Only draw if within minimap bounds
-            if (self.x < map_x < self.x + self.width and 
-                self.y < map_y < self.y + self.height):
-                pygame.draw.circle(surface, (100, 60, 20), (int(map_x), int(map_y)), 2)
+        # Draw the platform boundary in a faint color
+        top_left = self.world_to_minimap(-20, -20)
+        top_right = self.world_to_minimap(20, -20)
+        bottom_right = self.world_to_minimap(20, 20)
+        bottom_left = self.world_to_minimap(-20, 20)
+        pygame.draw.polygon(surface, outline_color, [top_left, top_right, bottom_right, bottom_left], 1)
         
-        # Draw mole position
+        if on_surface:
+            # Draw plants at their coordinates
+            plant_positions = [(-8, -8), (-8, 8), (8, -8), (8, 8)]
+            for px, pz in plant_positions:
+                # Check if the plant block still exists (it's at y=11)
+                # If it was dug out, we don't draw it
+                if not terrain.is_block_at(px, 11, pz):
+                    continue
+                map_x, map_y = self.world_to_minimap(px, pz)
+                pygame.draw.circle(surface, (200, 100, 50), (int(map_x), int(map_y)), 5)
+                pygame.draw.circle(surface, (76, 175, 80), (int(map_x), int(map_y)), 3)
+                
+            # Draw holes dug in the grass layer (y = 10)
+            for (bx, by, bz) in terrain.dug_blocks:
+                if by == 10:
+                    map_x, map_y = self.world_to_minimap(bx, bz)
+                    block_size_map_w = (self.width - 20) / 40.0
+                    block_size_map_h = (self.height - 20) / 40.0
+                    # Draw hole as a dark soil color
+                    pygame.draw.rect(surface, (50, 25, 0), 
+                                     (map_x - block_size_map_w/2, map_y - block_size_map_h/2, 
+                                      max(2.0, block_size_map_w), max(2.0, block_size_map_h)))
+        else:
+            # Draw starting chamber empty area (x: -5 to 5, z: -5 to 5)
+            start_tl = self.world_to_minimap(-5, -5)
+            start_br = self.world_to_minimap(5, 5)
+            pygame.draw.rect(surface, (100, 60, 20), (start_tl[0], start_tl[1], start_br[0] - start_tl[0], start_br[1] - start_tl[1]))
+            
+            # Draw dug tunnels
+            dug_xz = set((bx, bz) for (bx, by, bz) in terrain.dug_blocks if by < 10)
+            block_size_map_w = (self.width - 20) / 40.0
+            block_size_map_h = (self.height - 20) / 40.0
+            for (bx, bz) in dug_xz:
+                map_x, map_y = self.world_to_minimap(bx, bz)
+                pygame.draw.rect(surface, (100, 60, 20), 
+                                 (map_x - block_size_map_w/2, map_y - block_size_map_h/2, 
+                                  max(2.0, block_size_map_w), max(2.0, block_size_map_h)))
+                
+        # Draw player position
         mole_map_x, mole_map_y = self.world_to_minimap(player.x, player.z)
         pygame.draw.circle(surface, ACCENT_ORANGE, (int(mole_map_x), int(mole_map_y)), 4)
         
-        # Draw direction indicator (small line showing forward direction)
-        forward_scale = 10
-        forward_x = mole_map_x - forward_scale
-        forward_y = mole_map_y
+        # Draw direction indicator pointing forward based on camera yaw
+        forward_scale = 12
+        dx = math.sin(math.radians(camera.yaw))
+        dz = math.cos(math.radians(camera.yaw))
+        forward_x = mole_map_x + dx * forward_scale
+        forward_y = mole_map_y + dz * forward_scale
         pygame.draw.line(surface, ACCENT_ORANGE, 
                         (int(mole_map_x), int(mole_map_y)), 
                         (int(forward_x), int(forward_y)), 2)
@@ -750,8 +805,8 @@ class MoleGame:
         self.terrain = Terrain3D(self.texture_manager)
         self.terrain.generate_terrain("underground")
         
-        # Initialize minimap for opposite layer view
-        self.minimap = Minimap(SCREEN_WIDTH - 210, 10, 200, 150)
+        # Initialize minimap
+        self.minimap = Minimap(SCREEN_WIDTH - 160, 10, 150, 150)
         
         # Initialize player (mole) - start underground
         self.player = Player(0, 1, 0)
@@ -1016,17 +1071,8 @@ class MoleGame:
         pos_rect = pos_text.get_rect(topleft=(10, 10))
         self.screen.blit(pos_text, pos_rect)
         
-        # Draw minimap (opposite layer)
-        self.screen.fill((50, 25, 0), pygame.Rect(SCREEN_WIDTH - 210, 10, 200, 150))
-        pygame.draw.rect(self.screen, (150, 100, 50), pygame.Rect(SCREEN_WIDTH - 210, 10, 200, 150), 2)
-        
-        minimap_text = self.font_tiny.render("Map", True, TEXT_WHITE)
-        self.screen.blit(minimap_text, (SCREEN_WIDTH - 200, 15))
-        
-        # Draw a simple mole indicator on minimap
-        minimap_mole_x = SCREEN_WIDTH - 110
-        minimap_mole_y = 85
-        pygame.draw.circle(self.screen, ACCENT_ORANGE, (int(minimap_mole_x), int(minimap_mole_y)), 4)
+        # Draw minimap
+        self.minimap.draw(self.screen, self.player, current_terrain, self.camera)
         
         # Draw controls info
         controls_text = self.font_tiny.render(
