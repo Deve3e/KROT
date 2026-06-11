@@ -28,11 +28,13 @@ class TextureManager:
     
     def load_textures(self) -> None:
         """Load textures from textures/ folder"""
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         texture_files = {
-            "soil": "textures/soil.png",
-            "grass": "textures/grass.png", 
-            "plant": "textures/plant.png",
-            "sky": "textures/sky.png"
+            "soil": os.path.join(base_dir, "textures", "soil.png"),
+            "grass": os.path.join(base_dir, "textures", "grass.png"), 
+            "plant": os.path.join(base_dir, "textures", "plant.png"),
+            "sky": os.path.join(base_dir, "textures", "sky.png")
         }
         
         for block_type, file_path in texture_files.items():
@@ -335,38 +337,31 @@ class Terrain3D:
                 self.exposed_blocks[(x, y, z)] = block_type
     
     def generate_terrain(self, layer: str = "underground") -> None:
-        """Generate terrain for a layer"""
+        """Generate terrain with a grass surface at the top of the underground"""
         self.blocks.clear()
         
-        if layer == "underground":
-            # Generate underground soil blocks in a reasonable area
-            for x in range(-20, 21):
-                for y in range(-10, 11):
-                    for z in range(-20, 21):
-                        # Create solid underground terrain
-                        self.add_block(x, y, z, "soil")
-            # Remove center area where player starts
-            for x in range(-5, 6):
-                for y in range(-3, 4):
-                    for z in range(-5, 6):
-                        self.remove_block(x, y, z)
-        
-        elif layer == "above_ground":
-            # Generate above ground (sky and grass)
-            for x in range(-20, 21):
+        # Generate underground blocks from y = -10 to y = 10
+        for x in range(-20, 21):
+            for y in range(-10, 11):
                 for z in range(-20, 21):
-                    # Grass layer
-                    self.add_block(x, 0, z, "grass")
-                    # Dirt below
-                    for y in range(-5, 0):
+                    # Make the top layer (y = 10) grass, and everything below it soil
+                    if y == 10:
+                        self.add_block(x, y, z, "grass")
+                    else:
                         self.add_block(x, y, z, "soil")
-            
-            # Add some obstacles (vegetables/plants)
-            self.add_block(-8, 0, -8, "plant")
-            self.add_block(-8, 0, 8, "plant")
-            self.add_block(8, 0, -8, "plant")
-            self.add_block(8, 0, 8, "plant")
-            
+                        
+        # Remove center area where player starts (from y = -3 to 3, and x, z from -5 to 5)
+        for x in range(-5, 6):
+            for y in range(-3, 4):
+                for z in range(-5, 6):
+                    self.remove_block(x, y, z)
+                    
+        # Add some obstacles (vegetables/plants) on top of the grass surface at y = 11
+        self.add_block(-8, 11, -8, "plant")
+        self.add_block(-8, 11, 8, "plant")
+        self.add_block(8, 11, -8, "plant")
+        self.add_block(8, 11, 8, "plant")
+        
         self.generate_exposed_blocks()
     
     def draw(self, surface: pygame.Surface, camera: Camera3D) -> None:
@@ -568,9 +563,8 @@ class Player:
         self.is_digging = False
         self.dig_cooldown = 0
         self.dig_target_y = start_y
-        self.current_layer = "underground"  # underground or above_ground
         self.dug_tunnels = set()  # Track dug positions
-        self.eye_height = 0.6
+        self.eye_height = 0.45
         
         # Gravity variables
         self.vy = 0.0
@@ -734,7 +728,9 @@ class MoleGame:
             self.font_title = self.font_large
         
         # Initialize image background (looks for "bg_image.png" in the game/addinfo folder)
-        self.bg_image = ImageBackground("addinfo/bg_image.png", SCREEN_WIDTH, SCREEN_HEIGHT)
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.bg_image = ImageBackground(os.path.join(base_dir, "addinfo", "bg_image.png"), SCREEN_WIDTH, SCREEN_HEIGHT)
         self.bg_offset = 0.0
         self.bg_offset_direction = 1
         self.bg_offset_min = -50
@@ -750,12 +746,9 @@ class MoleGame:
         self.camera.yaw = 0  # Looking forward
         self.camera.pitch = 0
         
-        # Initialize terrain for both layers
-        self.terrain_underground = Terrain3D(self.texture_manager)
-        self.terrain_underground.generate_terrain("underground")
-        
-        self.terrain_above_ground = Terrain3D(self.texture_manager)
-        self.terrain_above_ground.generate_terrain("above_ground")
+        # Initialize terrain
+        self.terrain = Terrain3D(self.texture_manager)
+        self.terrain.generate_terrain("underground")
         
         # Initialize minimap for opposite layer view
         self.minimap = Minimap(SCREEN_WIDTH - 210, 10, 200, 150)
@@ -841,12 +834,11 @@ class MoleGame:
             "WASD: Move forward/backward and strafe",
             "SPACE: Jump",
             "LEFT CLICK: Dig the block you are looking at",
-            "TAB: Switch between underground/above-ground",
             "",
             "GAMEPLAY:",
             "- You start underground as a mole in the garden",
             "- Dig through soil blocks by looking at them and LEFT CLICKING",
-            "- Switch layers to navigate both underground and surface",
+            "- Dig upwards to reach the grass surface level of the underground",
             "- Find holes to escape, but the gardener keeps blocking them",
             "- The gardener plants vegetables and can't see behind them",
             "- If seen by the gardener, you'll be chased - RUN!",
@@ -944,7 +936,7 @@ class MoleGame:
                 
                 elif self.state == GameState.PLAYING:
                     if event.button == 1:  # Left click to dig
-                        current_terrain = self.terrain_underground if self.player.current_layer == "underground" else self.terrain_above_ground
+                        current_terrain = self.terrain
                         self.player.dig_forward(self.camera, current_terrain)
                 
                 elif self.state == GameState.INSTRUCTIONS:
@@ -965,14 +957,7 @@ class MoleGame:
                         pygame.mouse.set_visible(True)
                         pygame.event.set_grab(False)
                 
-                elif event.key == pygame.K_TAB and self.state == GameState.PLAYING:
-                    # Switch layers
-                    if self.player.current_layer == "underground":
-                        self.player.current_layer = "above_ground"
-                        self.camera.set_position(self.player.x, self.player.y + self.player.eye_height, self.player.z)
-                    else:
-                        self.player.current_layer = "underground"
-                        self.camera.set_position(self.player.x, self.player.y + self.player.eye_height, self.player.z)
+
     
     def update(self) -> None:
         """Update game logic"""
@@ -986,8 +971,8 @@ class MoleGame:
                 self.bg_offset_direction = 1
         
         elif self.state == GameState.PLAYING:
-            # Get appropriate terrain based on current layer
-            current_terrain = self.terrain_underground if self.player.current_layer == "underground" else self.terrain_above_ground
+            # Get appropriate terrain
+            current_terrain = self.terrain
             
             # Handle player movement based on keyboard input
             keys = pygame.key.get_pressed()
@@ -1014,8 +999,8 @@ class MoleGame:
         """Draw the main game screen with single-layer 3D view"""
         self.screen.fill((135, 206, 235))  # Sky blue background
         
-        # Get appropriate terrain based on current layer
-        current_terrain = self.terrain_underground if self.player.current_layer == "underground" else self.terrain_above_ground
+        # Get appropriate terrain
+        current_terrain = self.terrain
         
         # Draw 3D terrain
         current_terrain.draw(self.screen, self.camera)
@@ -1023,20 +1008,12 @@ class MoleGame:
         # Draw player crosshair
         self.player.draw(self.screen, self.camera)
         
-        # Draw current layer indicator
-        layer_text = self.font_small.render(
-            f"Layer: {'UNDERGROUND' if self.player.current_layer == 'underground' else 'ABOVE GROUND'}", 
-            True, TEXT_WHITE
-        )
-        layer_rect = layer_text.get_rect(topleft=(10, 10))
-        self.screen.blit(layer_text, layer_rect)
-        
         # Draw position info
         pos_text = self.font_tiny.render(
             f"X: {self.player.x:.1f} Y: {self.player.y:.1f} Z: {self.player.z:.1f}", 
             True, TEXT_WHITE
         )
-        pos_rect = pos_text.get_rect(topleft=(10, 40))
+        pos_rect = pos_text.get_rect(topleft=(10, 10))
         self.screen.blit(pos_text, pos_rect)
         
         # Draw minimap (opposite layer)
@@ -1053,7 +1030,7 @@ class MoleGame:
         
         # Draw controls info
         controls_text = self.font_tiny.render(
-            "WASD: Move | MOUSE: Look | SPACE: Jump | LEFT CLICK: Dig | TAB: Layer | ESC: Home",
+            "WASD: Move | MOUSE: Look | SPACE: Jump | LEFT CLICK: Dig | ESC: Home",
             True, TEXT_WHITE
         )
         controls_rect = controls_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 20))
