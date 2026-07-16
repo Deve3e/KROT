@@ -108,6 +108,7 @@ class GameState(Enum):
     INSTRUCTIONS = 2
     SETTINGS = 3
     PLAYING = 4
+    PAUSED = 5
 
 
 class Camera2D:
@@ -380,7 +381,8 @@ class MoleGame:
         self.bg_offset_max = 50
         self.bg_offset_speed = 0.25
         
-        self._init_home_buttons()
+        self.previous_state = GameState.HOME
+        self._init_buttons()
         
         self.camera = Camera2D(SCREEN_WIDTH, SCREEN_HEIGHT, self.block_size)
         
@@ -391,15 +393,27 @@ class MoleGame:
         
         self.player = Player(0, 26)  # Start underground in the cave
         
-    def _init_home_buttons(self) -> None:
+    def reset_game(self) -> None:
+        """Reset the game state for a new playthrough"""
+        self.terrain.generate_terrain()
+        self.player = Player(0, 26)
+        self.camera.set_position(self.player.x + self.player.width/2, self.player.y + self.player.height/2)
+        
+    def _init_buttons(self) -> None:
         button_width = 250
         button_height = 60
         button_x = (SCREEN_WIDTH - button_width) // 2
         
+        # Home buttons
         self.play_button = Button(button_x, 300, button_width, button_height, "PLAY")
         self.instructions_button = Button(button_x, 400, button_width, button_height, "HOW TO PLAY")
         self.settings_button = Button(button_x, 500, button_width, button_height, "SETTINGS")
         self.quit_button = Button(button_x, 600, button_width, button_height, "EXIT")
+        
+        # Pause buttons
+        self.resume_button = Button(button_x, 300, button_width, button_height, "RESUME")
+        self.pause_settings_button = Button(button_x, 400, button_width, button_height, "SETTINGS")
+        self.exit_to_home_button = Button(button_x, 500, button_width, button_height, "EXIT TO HOME")
         
     def draw_home_screen(self) -> None:
         if self.bg_image.image_loaded and self.bg_image.image_surface:
@@ -505,33 +519,53 @@ class MoleGame:
                     self.instructions_button.update_hover(mouse_pos)
                     self.settings_button.update_hover(mouse_pos)
                     self.quit_button.update_hover(mouse_pos)
+                elif self.state == GameState.PAUSED:
+                    self.resume_button.update_hover(mouse_pos)
+                    self.pause_settings_button.update_hover(mouse_pos)
+                    self.exit_to_home_button.update_hover(mouse_pos)
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_pos = event.pos
                 if self.state == GameState.HOME:
                     if self.play_button.is_clicked(mouse_pos):
+                        self.reset_game()
                         self.state = GameState.PLAYING
                     elif self.instructions_button.is_clicked(mouse_pos):
+                        self.previous_state = GameState.HOME
                         self.state = GameState.INSTRUCTIONS
                     elif self.settings_button.is_clicked(mouse_pos):
+                        self.previous_state = GameState.HOME
                         self.state = GameState.SETTINGS
                     elif self.quit_button.is_clicked(mouse_pos):
                         self.running = False
                 
+                elif self.state == GameState.PAUSED:
+                    if self.resume_button.is_clicked(mouse_pos):
+                        self.state = GameState.PLAYING
+                    elif self.pause_settings_button.is_clicked(mouse_pos):
+                        self.previous_state = GameState.PAUSED
+                        self.state = GameState.SETTINGS
+                    elif self.exit_to_home_button.is_clicked(mouse_pos):
+                        self.state = GameState.HOME
+                
                 elif self.state == GameState.INSTRUCTIONS:
                     back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
                     if back_button.is_clicked(mouse_pos):
-                        self.state = GameState.HOME
+                        self.state = self.previous_state
                 
                 elif self.state == GameState.SETTINGS:
                     back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
                     if back_button.is_clicked(mouse_pos):
-                        self.state = GameState.HOME
+                        self.state = self.previous_state
             
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    if self.state != GameState.HOME:
-                        self.state = GameState.HOME
+                    if self.state == GameState.PLAYING:
+                        self.state = GameState.PAUSED
+                    elif self.state == GameState.PAUSED:
+                        self.state = GameState.PLAYING
+                    elif self.state in [GameState.INSTRUCTIONS, GameState.SETTINGS]:
+                        self.state = self.previous_state
     
     def update(self) -> None:
         if self.state == GameState.HOME and self.bg_image.image_loaded:
@@ -561,8 +595,26 @@ class MoleGame:
             self.draw_settings_screen()
         elif self.state == GameState.PLAYING:
             self.draw_playing_screen()
+        elif self.state == GameState.PAUSED:
+            self.draw_pause_screen()
         
         pygame.display.flip()
+        
+    def draw_pause_screen(self) -> None:
+        self.draw_playing_screen()
+        
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(128)
+        overlay.fill((0, 0, 0))
+        self.screen.blit(overlay, (0, 0))
+        
+        title_text = self.font_large.render("PAUSED", True, ACCENT_ORANGE)
+        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, 200))
+        self.screen.blit(title_text, title_rect)
+        
+        self.resume_button.draw(self.screen)
+        self.pause_settings_button.draw(self.screen)
+        self.exit_to_home_button.draw(self.screen)
     
     def draw_playing_screen(self) -> None:
         self.screen.fill((135, 206, 235))  # Sky blue background
@@ -580,7 +632,7 @@ class MoleGame:
         self.minimap.draw(self.screen, self.player, self.terrain)
         
         controls_text = self.font_tiny.render(
-            "A/D: Move | W/SPACE: Jump | LEFT CLICK: Dig | ESC: Home",
+            "A/D: Move | W/SPACE: Jump | LEFT CLICK: Dig | ESC: Pause",
             True, TEXT_WHITE
         )
         controls_rect = controls_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 20))
