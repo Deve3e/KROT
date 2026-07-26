@@ -11,8 +11,8 @@ from typing import Optional
 pygame.init()
 
 # Screen dimensions
-SCREEN_WIDTH = 1200
-SCREEN_HEIGHT = 800
+SCREEN_WIDTH = 1280
+SCREEN_HEIGHT = 720
 
 # Colors
 BG_COLOR = (34, 34, 34)  # Dark gray
@@ -26,7 +26,8 @@ BUTTON_HOVER = (255, 154, 66)  # Bright gold on hover
 class TextureManager:
     """Manages block textures for 2D rendering"""
     def __init__(self, block_size: int = 40):
-        self.textures = {}  # block_type -> pygame.Surface
+        self.textures = {}   # block_type -> pygame.Surface  (primary/fallback)
+        self.variants = {}   # block_type -> [pygame.Surface, ...]  (all variants incl. primary)
         self.block_size = block_size
         self.load_textures()
     
@@ -34,12 +35,13 @@ class TextureManager:
         """Load textures from textures/ folder"""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         texture_files = {
-            "soil": os.path.join(base_dir, "textures", "soil.png"),
-            "grass": os.path.join(base_dir, "textures", "grass.png"), 
-            "plant": os.path.join(base_dir, "textures", "plant.png"),
-            "sky": os.path.join(base_dir, "textures", "sky.png"),
+            "soil":     os.path.join(base_dir, "textures", "soil.png"),
+            "grass":    os.path.join(base_dir, "textures", "grass.png"), 
+            "plant":    os.path.join(base_dir, "textures", "plant.png"),
+            "sky":      os.path.join(base_dir, "textures", "sky.png"),
             "gardener": os.path.join(base_dir, "textures", "gardener.png"),
-            "stone": os.path.join(base_dir, "textures", "stone.png")
+            "stone":    os.path.join(base_dir, "textures", "stone.png"),
+            "player":   os.path.join(base_dir, "textures", "player.png"),
         }
         
         for block_type, file_path in texture_files.items():
@@ -48,10 +50,29 @@ class TextureManager:
                 texture = texture.convert_alpha()
                 texture = pygame.transform.scale(texture, (self.block_size, self.block_size))
                 self.textures[block_type] = texture
+                self.variants[block_type] = [texture]
                 print(f"Loaded texture: {block_type}")
             except Exception as e:
                 print(f"Failed to load texture {block_type}: {e}")
-                self.textures[block_type] = self._create_fallback_texture(block_type)
+                fallback = self._create_fallback_texture(block_type)
+                self.textures[block_type] = fallback
+                self.variants[block_type] = [fallback]
+
+        # Auto-load additional soil variants: soil2.png, soil3.png, ...
+        # Keep scanning until a file is missing.
+        textures_dir = os.path.join(base_dir, "textures")
+        for i in range(2, 100):
+            path = os.path.join(textures_dir, f"soil{i}.png")
+            if not os.path.exists(path):
+                break
+            try:
+                tex = pygame.image.load(path).convert_alpha()
+                tex = pygame.transform.scale(tex, (self.block_size, self.block_size))
+                self.variants["soil"].append(tex)
+                print(f"Loaded texture: soil variant {i}")
+            except Exception as e:
+                print(f"Failed to load soil variant {i}: {e}")
+                break
     
     def _create_fallback_texture(self, block_type: str) -> pygame.Surface:
         """Create a fallback colored texture if image loading fails"""
@@ -85,8 +106,18 @@ class TextureManager:
         return surface
     
     def get_texture(self, block_type: str) -> pygame.Surface:
-        """Get texture for block type"""
+        """Get the primary texture for a block type."""
         return self.textures.get(block_type, self.textures.get("soil", None))
+
+    def get_texture_variant(self, block_type: str, x: int, y: int) -> pygame.Surface:
+        """Pick a texture variant deterministically from (x, y) so the same
+        block always shows the same texture without storing extra data."""
+        var_list = self.variants.get(block_type)
+        if not var_list:
+            return self.get_texture(block_type)
+        # Simple spatial hash — stable across frames, visually uncorrelated
+        idx = (x * 2654435761 ^ y * 2246822519) % len(var_list)
+        return var_list[idx]
 
 
 class ImageBackground:
@@ -127,6 +158,7 @@ class GameState(Enum):
     PLAYING = 4
     PAUSED = 5
     GAME_OVER = 6
+    WIN = 7
 
 
 class Camera2D:
@@ -162,13 +194,18 @@ class Terrain2D:
         self.texture_manager = texture_manager
         self.block_size = block_size
         self.blocks = {}  # (x, y) -> block_type
+        self.particle_system: Optional['ParticleSystem'] = None
         
     def add_block(self, x: int, y: int, block_type: str = "soil") -> None:
         self.blocks[(x, y)] = block_type
     
-    def remove_block(self, x: int, y: int) -> None:
+    def remove_block(self, x: int, y: int) -> Optional[str]:
         if (x, y) in self.blocks:
-            del self.blocks[(x, y)]
+            block_type = self.blocks.pop((x, y))
+            if self.particle_system is not None:
+                self.particle_system.spawn_break(x + 0.5, y + 0.5, block_type)
+            return block_type
+        return None
     
     def is_block_at(self, x: int, y: int) -> bool:
         return (x, y) in self.blocks
@@ -213,7 +250,8 @@ class Terrain2D:
             for x in range(start_x, end_x):
                 if (x, y) in self.blocks:
                     block_type = self.blocks[(x, y)]
-                    texture = self.texture_manager.get_texture(block_type)
+                    # Use variant lookup so different soil blocks can look distinct
+                    texture = self.texture_manager.get_texture_variant(block_type, x, y)
                     screen_x, screen_y = camera.world_to_screen(x, y)
                     if texture:
                         surface.blit(texture, (screen_x, screen_y))
@@ -284,11 +322,14 @@ class Player:
         
         self.speed = 0.15
         self.dig_cooldown = 0
+        self.dig_timer = 0
+        self.dig_target: Optional[tuple[int, int]] = None
         
         self.vy = 0.0
         self.is_on_ground = False
         
-    def handle_input(self, keys, camera: Camera2D, terrain: Terrain2D, mouse_buttons, mouse_pos) -> None:
+    def handle_input(self, keys, camera: Camera2D, terrain: Terrain2D, mouse_buttons, mouse_pos) -> bool:
+        destroyed_seed = False
         dx = 0
         if keys[pygame.K_a]:
             dx -= self.speed
@@ -307,15 +348,26 @@ class Player:
         if self.dig_cooldown > 0:
             self.dig_cooldown -= 1
             
+        if self.dig_timer > 0:
+            return False
+        
         if mouse_buttons[0] and self.dig_cooldown <= 0:
             world_x, world_y = camera.screen_to_world(mouse_pos[0], mouse_pos[1])
             bx, by = int(math.floor(world_x)), int(math.floor(world_y))
             
             dist = math.hypot(self.x + self.width/2 - bx - 0.5, self.y + self.height/2 - by - 0.5)
-            if dist <= 4.0:
+            if terrain.is_block_at(bx, by) and terrain.blocks.get((bx, by)) == "plant":
+                if dist <= 1.0:
+                    self.dig_timer = 30
+                    self.dig_target = (bx, by)
+                    self.dig_cooldown = 30
+            elif dist <= 4.0:
                 if terrain.is_block_at(bx, by) and terrain.blocks.get((bx, by)) != "stone":
-                    terrain.remove_block(bx, by)
+                    removed_block = terrain.remove_block(bx, by)
+                    if removed_block == "plant":
+                        return True
                     self.dig_cooldown = 15
+        return False
     
     def _check_collision(self, x: float, y: float, terrain: Terrain2D) -> bool:
         margin = 0.05
@@ -331,7 +383,18 @@ class Player:
                 return True
         return False
         
-    def update(self, terrain: Terrain2D) -> None:
+    def update(self, terrain: Terrain2D) -> bool:
+        destroyed_seed = False
+        if self.dig_timer > 0:
+            self.dig_timer -= 1
+            if self.dig_timer == 0 and self.dig_target:
+                bx, by = self.dig_target
+                dist = math.hypot(self.x + self.width/2 - bx - 0.5, self.y + self.height/2 - by - 0.5)
+                if dist <= 1.0 and terrain.is_block_at(bx, by) and terrain.blocks.get((bx, by)) == "plant":
+                    terrain.remove_block(bx, by)
+                    destroyed_seed = True
+                self.dig_target = None
+        
         GRAVITY = 0.02
         TERMINAL_VELOCITY = 0.5
         
@@ -356,17 +419,28 @@ class Player:
             else:
                 self.y = new_y
                 self.is_on_ground = False
+        return destroyed_seed
     
-    def draw(self, surface: pygame.Surface, camera: Camera2D) -> None:
+    def draw(self, surface: pygame.Surface, camera: Camera2D,
+             texture_manager: Optional['TextureManager'] = None) -> None:
         screen_x, screen_y = camera.world_to_screen(self.x, self.y)
-        pixel_width = int(self.width * camera.block_size)
+        pixel_width  = int(self.width  * camera.block_size)
         pixel_height = int(self.height * camera.block_size)
-        
-        rect = pygame.Rect(screen_x, screen_y, pixel_width, pixel_height)
-        pygame.draw.rect(surface, ACCENT_ORANGE, rect, border_radius=8)
-        
-        # Eyes
-        pygame.draw.circle(surface, (0, 0, 0), (int(screen_x + pixel_width * 0.7), int(screen_y + pixel_height * 0.3)), 3)
+
+        # Try to use a player skin texture
+        skin = texture_manager.get_texture("player") if texture_manager else None
+        if skin:
+            # Scale to the actual pixel size this frame
+            scaled = pygame.transform.scale(skin, (pixel_width, pixel_height))
+            # Flip when moving left (reuse last horizontal direction via vx sign)
+            surface.blit(scaled, (screen_x, screen_y))
+        else:
+            # Fallback: orange rounded rectangle + eye
+            rect = pygame.Rect(screen_x, screen_y, pixel_width, pixel_height)
+            pygame.draw.rect(surface, ACCENT_ORANGE, rect, border_radius=8)
+            pygame.draw.circle(surface, (0, 0, 0),
+                               (int(screen_x + pixel_width * 0.7),
+                                int(screen_y + pixel_height * 0.3)), 3)
 
 
 class Gardener:
@@ -385,6 +459,12 @@ class Gardener:
         self.vy = 0.0
         self.is_on_ground = False
         self.vision_range = 15.0
+        self.climb_target_x: Optional[float] = None
+        # Track where the gardener sank underground so it can climb back
+        self.prev_y: float = start_y
+        self.surface_return_x: Optional[float] = None
+        # Timer to avoid spamming grass placement
+        self.grass_repair_timer: int = 0
         
     def _check_collision(self, x: float, y: float, terrain: 'Terrain2D') -> bool:
         margin = 0.05
@@ -399,19 +479,80 @@ class Gardener:
             if terrain.is_block_at(bx, by) and terrain.blocks.get((bx, by)) != "plant":
                 return True
         return False
+
+    def _is_passable_tile(self, x: int, y: int, terrain: 'Terrain2D') -> bool:
+        if y < 0:
+            return True
+        return not terrain.is_block_at(x, y) or terrain.blocks.get((x, y)) == "plant"
+
+    def _column_has_open_path(self, x: int, current_y: int, terrain: 'Terrain2D') -> bool:
+        for ty in range(current_y, -1, -1):
+            if not self._is_passable_tile(x, ty, terrain):
+                return False
+        return True
+
+    def _find_surface_column(self, terrain: 'Terrain2D') -> Optional[float]:
+        current_y = int(math.floor(self.y))
+        start_col = int(math.floor(self.x))
+        for offset in range(0, 101):
+            for candidate in (start_col + offset, start_col - offset):
+                if candidate < -50 or candidate > 50:
+                    continue
+                if self._column_has_open_path(candidate, current_y, terrain):
+                    return float(candidate)
+        return None
         
     def can_see(self, player: 'Player', terrain: 'Terrain2D') -> bool:
         """Check if player is on the same vertical level as the gardener"""
         return abs(self.y - player.y) < 1.5
 
+    def _is_breakable_tile(self, x: int, y: int, terrain: 'Terrain2D') -> bool:
+        if not terrain.is_block_at(x, y):
+            return False
+        return terrain.blocks.get((x, y)) != "stone"
+
+    def _break_above_block(self, terrain: 'Terrain2D') -> bool:
+        """Break the block directly above the gardener's head (used when blocked horizontally)."""
+        above_y = int(math.floor(self.y - 0.01))
+        left_x = int(math.floor(self.x + 0.1))
+        right_x = int(math.floor(self.x + self.width - 0.1))
+        removed = False
+        for bx in (left_x, right_x):
+            if self._is_breakable_tile(bx, above_y, terrain):
+                terrain.remove_block(bx, above_y)
+                removed = True
+        return removed
+
     def update(self, terrain: 'Terrain2D', player: 'Player') -> None:
+        # --- Track y-level increases (gardener sinking underground) ---
+        if self.state != "CHASE" and self.y > self.prev_y + 0.5:
+            # Gardener sank deeper; remember where this happened
+            self.surface_return_x = self.x
+        self.prev_y = self.y
+
         if self.can_see(player, terrain):
             self.state = "CHASE"
             self.wander_timer = 0
+            self.climb_target_x = None
+            self.surface_return_x = None
         else:
             if self.state == "CHASE":
                 self.state = "WANDER"
-                
+                self.climb_target_x = None
+
+        if self.state != "CHASE" and self.y > 2.0:
+            self.state = "CLIMB"
+            if self.climb_target_x is None:
+                # Prefer returning to where we fell if we have that info
+                if self.surface_return_x is not None:
+                    self.climb_target_x = self.surface_return_x
+                else:
+                    self.climb_target_x = self._find_surface_column(terrain)
+            else:
+                current_col = int(round(self.climb_target_x))
+                if not self._column_has_open_path(current_col, int(math.floor(self.y)), terrain):
+                    self.climb_target_x = self._find_surface_column(terrain)
+
         if self.state == "WANDER":
             if self.wander_timer <= 0:
                 self.direction = random.choice([-1, 1])
@@ -423,7 +564,34 @@ class Gardener:
                 self.direction = 1
             else:
                 self.direction = -1
-                
+        elif self.state == "CLIMB":
+            if self.climb_target_x is None:
+                if self.wander_timer <= 0:
+                    self.direction = random.choice([-1, 1])
+                    self.wander_timer = random.randint(60, 180)
+                else:
+                    self.wander_timer -= 1
+            else:
+                # Navigate towards the target column
+                if abs(self.x - self.climb_target_x) > 0.15:
+                    self.direction = 1 if self.climb_target_x > self.x else -1
+                else:
+                    # Reached the target column — jump left or right to get on surface
+                    self.direction = random.choice([-1, 1])
+                    self.surface_return_x = None  # Clear the return target
+                if self.is_on_ground:
+                    above_x = int(math.floor(self.x + self.width / 2))
+                    above_y = int(math.floor(self.y - 1))
+                    if self._is_passable_tile(above_x, above_y, terrain):
+                        self.vy = -0.4
+                        self.is_on_ground = False
+                    else:
+                        if self._break_above_block(terrain):
+                            self.vy = -0.4
+                            self.is_on_ground = False
+                        else:
+                            self.climb_target_x = self._find_surface_column(terrain)
+
         # 1. Horizontal movement
         speed = self.chase_speed if self.state == "CHASE" else self.patrol_speed
         new_x = self.x + speed * self.direction
@@ -432,12 +600,19 @@ class Gardener:
         if not self._check_collision(new_x, self.y, terrain):
             self.x = new_x
         else:
-            # Hit a wall, try to jump if on ground
-            if self.is_on_ground:
+            # When blocked horizontally, break the block ABOVE (not in front) to climb up
+            if self._break_above_block(terrain):
+                # Try to move into the freed space next tick; for now try the move
+                if not self._check_collision(new_x, self.y, terrain):
+                    self.x = new_x
+                elif self.is_on_ground:
+                    self.vy = -0.4
+                    self.is_on_ground = False
+            elif self.is_on_ground:
                 self.vy = -0.4
                 self.is_on_ground = False
             else:
-                # Turn around if wandering and hit a wall
+                # Turn around if wandering and hit a wall while airborne
                 if self.state == "WANDER":
                     self.direction *= -1
                     self.wander_timer = random.randint(60, 180)
@@ -485,6 +660,28 @@ class Gardener:
             if not terrain.is_block_at(bx, by) and terrain.is_block_at(bx, by + 1):
                 if random.random() < 0.005:
                     terrain.add_block(bx, by, "plant")
+
+        # Grass repair logic: when not chasing, check the block diagonally below (same
+        # row as the ground the gardener stands on, one tile to the side) and restore it.
+        if self.state != "CHASE" and self.is_on_ground:
+            if self.grass_repair_timer > 0:
+                self.grass_repair_timer -= 1
+            else:
+                # ground_y = the actual block the gardener is standing ON (one row below feet)
+                foot_y = int(math.floor(self.y + self.height - 0.1))
+                ground_y = foot_y + 1  # row of the ground block beneath the gardener
+                for check_x in (
+                    int(math.floor(self.x - 1)),
+                    int(math.floor(self.x + self.width))
+                ):
+                    # "Diagonally below": same depth as the ground the gardener stands on,
+                    # but one tile to the side. If that block is missing, replace it with grass.
+                    if (not terrain.is_block_at(check_x, ground_y)
+                            and terrain.is_block_at(check_x, ground_y + 1)
+                            and terrain.blocks.get((check_x, ground_y + 1)) not in ("plant",)):
+                        terrain.add_block(check_x, ground_y, "grass")
+                        self.grass_repair_timer = 120  # 2-second cooldown
+                        break
                 
     def draw(self, surface: pygame.Surface, camera: 'Camera2D', texture_manager: 'TextureManager') -> None:
         screen_x, screen_y = camera.world_to_screen(self.x, self.y)
@@ -611,6 +808,155 @@ class Snake:
                 pygame.draw.circle(surface, (255, 0, 0), (cx + eye_offset_x, cy - eye_offset_y), 2)
 
 
+class ParticleSystem:
+    """Spawns and updates block-break debris particles"""
+
+    # Palette of debris colours per block type
+    _COLORS: dict = {
+        'soil':  [(139, 90, 43), (160, 105, 50), (120, 70, 30), (180, 125, 60)],
+        'grass': [(76, 175, 80),  (100, 200, 80), (55, 140, 40), (139, 90, 43)],
+        'stone': [(120, 120, 120),(150, 150, 150),(90, 90, 90),  (170, 170, 170)],
+        'plant': [(76, 175, 80),  (50, 150, 60),  (100, 180, 60)],
+    }
+    _DEFAULT = [(150, 100, 50)]
+
+    def __init__(self) -> None:
+        # Each particle: [x, y, vx, vy, life, max_life, (r,g,b), size]
+        self._particles: list = []
+
+    def clear(self) -> None:
+        self._particles.clear()
+
+    def spawn_break(self, wx: float, wy: float, block_type: str) -> None:
+        """Burst particles at world position (wx, wy) using colours for block_type."""
+        palette = self._COLORS.get(block_type, self._DEFAULT)
+        count = random.randint(7, 14)
+        for _ in range(count):
+            angle = random.uniform(0, math.pi * 2)
+            speed = random.uniform(0.025, 0.13)
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed - random.uniform(0.02, 0.08)  # upward bias
+            life = random.randint(22, 52)
+            color = random.choice(palette)
+            size = random.randint(2, 5)
+            self._particles.append([
+                wx + random.uniform(-0.25, 0.25),
+                wy + random.uniform(-0.25, 0.25),
+                vx, vy, life, life, color, size
+            ])
+
+    def update(self) -> None:
+        GRAVITY = 0.005
+        alive = []
+        for p in self._particles:
+            p[3] += GRAVITY   # vy += gravity
+            p[0] += p[2]      # x += vx
+            p[1] += p[3]      # y += vy
+            p[4] -= 1         # life -= 1
+            if p[4] > 0:
+                alive.append(p)
+        self._particles = alive
+
+    def draw(self, surface: pygame.Surface, camera: 'Camera2D') -> None:
+        sw = surface.get_width()
+        sh = surface.get_height()
+        for p in self._particles:
+            sx, sy = camera.world_to_screen(p[0], p[1])
+            if sx < -8 or sx > sw + 8 or sy < -8 or sy > sh + 8:
+                continue
+            alpha = p[4] / p[5]                     # life / max_life  (0..1)
+            r = int(p[6][0] * alpha)
+            g = int(p[6][1] * alpha)
+            b = int(p[6][2] * alpha)
+            sz = max(1, int(p[7] * (0.4 + 0.6 * alpha)))
+            pygame.draw.rect(surface, (r, g, b), (int(sx), int(sy), sz, sz))
+
+
+class CloudSystem:
+    """Drifting fluffy clouds rendered in world-space sky"""
+
+    def __init__(self):
+        self.clouds: list = []
+        # Pre-baked gradient sky surface (1px wide, scaled at draw time)
+        self._sky_grad: Optional[pygame.Surface] = None
+        for _ in range(12):
+            x = random.uniform(-55, 55)
+            y = random.uniform(-20, -3)
+            self.clouds.append(self._make_cloud(x, y))
+
+    def _make_cloud(self, x: float, y: float) -> dict:
+        size = random.uniform(1.0, 2.6)
+        n = random.randint(4, 7)
+        puffs = []
+        for _ in range(n):
+            px = random.uniform(-size * 0.65, size * 0.65)
+            py = random.uniform(-size * 0.15, size * 0.15)
+            rx = random.uniform(size * 0.35, size * 0.75)
+            ry = random.uniform(size * 0.20, size * 0.40)
+            puffs.append((px, py, rx, ry))
+        return {
+            'x': x, 'y': y,
+            'drift': random.uniform(0.003, 0.009),
+            'puffs': puffs,
+        }
+
+    def reset(self) -> None:
+        self.clouds.clear()
+        for _ in range(12):
+            x = random.uniform(-55, 55)
+            y = random.uniform(-20, -3)
+            self.clouds.append(self._make_cloud(x, y))
+
+    def update(self) -> None:
+        for cloud in self.clouds:
+            cloud['x'] += cloud['drift']
+            if cloud['x'] > 58:
+                cloud['x'] = -58
+                cloud['y'] = random.uniform(-20, -3)
+
+    def draw_sky(self, surface: pygame.Surface) -> None:
+        """Draw a smooth top-to-bottom sky gradient."""
+        if self._sky_grad is None or self._sky_grad.get_height() != surface.get_height():
+            h = surface.get_height()
+            self._sky_grad = pygame.Surface((1, h))
+            top = (82, 172, 230)
+            bot = (148, 218, 250)
+            for row in range(h):
+                t = row / max(h - 1, 1)
+                r = int(top[0] + (bot[0] - top[0]) * t)
+                g = int(top[1] + (bot[1] - top[1]) * t)
+                b = int(top[2] + (bot[2] - top[2]) * t)
+                self._sky_grad.set_at((0, row), (r, g, b))
+        scaled = pygame.transform.scale(self._sky_grad, surface.get_size())
+        surface.blit(scaled, (0, 0))
+
+    def draw_clouds(self, surface: pygame.Surface, camera: 'Camera2D') -> None:
+        """Draw all clouds; skip any below the top of the screen."""
+        bs = camera.block_size
+        sw = surface.get_width()
+        sh = surface.get_height()
+        for cloud in self.clouds:
+            cx, cy = camera.world_to_screen(cloud['x'], cloud['y'])
+            if cx < -300 or cx > sw + 300 or cy > sh:
+                continue
+            # Subtle blue-grey shadow slightly below each puff
+            for (px, py, rx, ry) in cloud['puffs']:
+                ex = int(cx + px * bs)
+                ey = int(cy + py * bs)
+                ew = max(6, int(rx * bs * 2))
+                eh = max(4, int(ry * bs * 2))
+                pygame.draw.ellipse(surface, (190, 218, 240),
+                                    (ex - ew // 2, ey - eh // 2 + 4, ew, eh))
+            # White puffs on top
+            for (px, py, rx, ry) in cloud['puffs']:
+                ex = int(cx + px * bs)
+                ey = int(cy + py * bs)
+                ew = max(6, int(rx * bs * 2))
+                eh = max(4, int(ry * bs * 2))
+                pygame.draw.ellipse(surface, (255, 255, 255),
+                                    (ex - ew // 2, ey - eh // 2, ew, eh))
+
+
 class Button:
     """Button class for UI elements"""
     def __init__(self, x: int, y: int, width: int, height: int, text: str, font_size: int = 32):
@@ -639,7 +985,19 @@ class Button:
 class MoleGame:
     """Main game class"""
     def __init__(self):
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        # Grab the desktop resolution BEFORE creating any window
+        _info = pygame.display.Info()
+        self.desktop_w = _info.current_w
+        self.desktop_h = _info.current_h
+
+        # Real display window – resizable, starts at the logical size
+        self.display = pygame.display.set_mode(
+            (SCREEN_WIDTH, SCREEN_HEIGHT),
+            pygame.RESIZABLE
+        )
+        # Fixed-size virtual surface – all game rendering happens here
+        self.screen = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.fullscreen = False
         pygame.display.set_caption("Mole Escape - Garden Defense")
         self.clock = pygame.time.Clock()
         self.running = True
@@ -677,27 +1035,34 @@ class MoleGame:
         
         # Initialize player, gardener, and snakes
         self.game_over_reason = "gardener"
+        self.seed_destroyed_count = 0
         self.player = Player(-50, 14)
         self.gardener = Gardener(10, -1)
-        self.snakes = []
-        for _ in range(4):
-            sx = random.uniform(-40, 40)
-            sy = random.uniform(2, 13)
-            self.snakes.append(Snake(sx, sy))
+        self.snakes = self._create_snakes(4)
+        self.snake_spawn_timer = 600  # 10 seconds at 60 FPS
         self.camera.set_position(self.player.x + self.player.width/2, self.player.y + self.player.height/2)
+        # Timer (in frames at 60 FPS)
+        self.play_time: int = 0
+        self.finish_time: int = 0
+        self.clouds = CloudSystem()
+        self.particles = ParticleSystem()
+        self.terrain.particle_system = self.particles
         
     def reset_game(self) -> None:
         """Reset the game state for a new playthrough"""
         self.terrain.generate_terrain()
         self.game_over_reason = "gardener"
+        self.seed_destroyed_count = 0
         self.player = Player(-50, 14)
         self.gardener = Gardener(10, -1)  # Gardener patrols surface (y=-1)
-        self.snakes = []
-        for _ in range(4):
-            sx = random.uniform(-40, 40)
-            sy = random.uniform(2, 13)
-            self.snakes.append(Snake(sx, sy))
+        self.snakes = self._create_snakes(4)
+        self.snake_spawn_timer = 600
         self.camera.set_position(self.player.x + self.player.width/2, self.player.y + self.player.height/2)
+        self.play_time = 0
+        self.finish_time = 0
+        self.clouds.reset()
+        self.particles.clear()
+        self.terrain.particle_system = self.particles
         
     def _init_buttons(self) -> None:
         button_width = 250
@@ -717,6 +1082,27 @@ class MoleGame:
         
         # Game Over buttons
         self.play_again_button = Button(button_x, 400, button_width, button_height, "PLAY AGAIN")
+
+    def _is_safe_snake_spawn(self, x: float, y: float) -> bool:
+        bx = int(math.floor(x))
+        by = int(math.floor(y))
+        return not (self.terrain.is_block_at(bx, by) and self.terrain.blocks.get((bx, by)) == "stone")
+
+    def _find_safe_snake_spawn(self, attempts: int = 200) -> tuple[float, float]:
+        for _ in range(attempts):
+            sx = random.uniform(-40, 40)
+            sy = random.uniform(2, 13)
+            if self._is_safe_snake_spawn(sx, sy):
+                return sx, sy
+        # Fallback to a default safe position if all random attempts hit stone blocks
+        return -40.0, 8.0
+
+    def _create_snakes(self, count: int) -> list['Snake']:
+        snakes = []
+        for _ in range(count):
+            sx, sy = self._find_safe_snake_spawn()
+            snakes.append(Snake(sx, sy))
+        return snakes
         
     def draw_home_screen(self) -> None:
         if self.bg_image.image_loaded and self.bg_image.image_surface:
@@ -810,13 +1196,33 @@ class MoleGame:
         back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
         back_button.draw(self.screen)
         
+    def _get_render_rect(self) -> pygame.Rect:
+        """Return the letterboxed rect where the virtual surface is drawn on the display."""
+        win_w, win_h = self.display.get_size()
+        scale = min(win_w / SCREEN_WIDTH, win_h / SCREEN_HEIGHT)
+        render_w = int(SCREEN_WIDTH * scale)
+        render_h = int(SCREEN_HEIGHT * scale)
+        offset_x = (win_w - render_w) // 2
+        offset_y = (win_h - render_h) // 2
+        return pygame.Rect(offset_x, offset_y, render_w, render_h)
+
+    def _scale_mouse_pos(self, pos: tuple) -> tuple:
+        """Convert real-window mouse coordinates to virtual-surface coordinates."""
+        rect = self._get_render_rect()
+        # Clamp to the rendered area then map
+        rx = max(0, min(pos[0] - rect.x, rect.width  - 1))
+        ry = max(0, min(pos[1] - rect.y, rect.height - 1))
+        sx = int(rx * SCREEN_WIDTH  / rect.width)
+        sy = int(ry * SCREEN_HEIGHT / rect.height)
+        return (sx, sy)
+
     def handle_events(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
             
             elif event.type == pygame.MOUSEMOTION:
-                mouse_pos = event.pos
+                mouse_pos = self._scale_mouse_pos(event.pos)
                 if self.state == GameState.HOME:
                     self.play_button.update_hover(mouse_pos)
                     self.instructions_button.update_hover(mouse_pos)
@@ -826,12 +1232,12 @@ class MoleGame:
                     self.resume_button.update_hover(mouse_pos)
                     self.pause_settings_button.update_hover(mouse_pos)
                     self.exit_to_home_button.update_hover(mouse_pos)
-                elif self.state == GameState.GAME_OVER:
+                elif self.state in [GameState.GAME_OVER, GameState.WIN]:
                     self.play_again_button.update_hover(mouse_pos)
                     self.exit_to_home_button.update_hover(mouse_pos)
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                mouse_pos = event.pos
+                mouse_pos = self._scale_mouse_pos(event.pos)
                 if self.state == GameState.HOME:
                     if self.play_button.is_clicked(mouse_pos):
                         self.reset_game()
@@ -854,7 +1260,7 @@ class MoleGame:
                     elif self.exit_to_home_button.is_clicked(mouse_pos):
                         self.state = GameState.HOME
                 
-                elif self.state == GameState.GAME_OVER:
+                elif self.state in [GameState.GAME_OVER, GameState.WIN]:
                     if self.play_again_button.is_clicked(mouse_pos):
                         self.reset_game()
                         self.state = GameState.PLAYING
@@ -872,7 +1278,17 @@ class MoleGame:
                         self.state = self.previous_state
             
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key == pygame.K_F11:
+                    self.fullscreen = not self.fullscreen
+                    if self.fullscreen:
+                        self.display = pygame.display.set_mode(
+                            (self.desktop_w, self.desktop_h), pygame.FULLSCREEN
+                        )
+                    else:
+                        self.display = pygame.display.set_mode(
+                            (SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE
+                        )
+                elif event.key == pygame.K_ESCAPE:
                     if self.state == GameState.PLAYING:
                         self.state = GameState.PAUSED
                     elif self.state == GameState.PAUSED:
@@ -891,17 +1307,35 @@ class MoleGame:
                 self.bg_offset_direction = 1
         
         elif self.state == GameState.PLAYING:
+            self.play_time += 1
+            self.clouds.update()
+            self.particles.update()
+
             keys = pygame.key.get_pressed()
             mouse_buttons = pygame.mouse.get_pressed()
-            mouse_pos = pygame.mouse.get_pos()
+            mouse_pos = self._scale_mouse_pos(pygame.mouse.get_pos())
             
-            self.player.handle_input(keys, self.camera, self.terrain, mouse_buttons, mouse_pos)
-            self.player.update(self.terrain)
+            if self.player.handle_input(keys, self.camera, self.terrain, mouse_buttons, mouse_pos):
+                self.seed_destroyed_count += 1
+                if self.seed_destroyed_count >= 10:
+                    self.finish_time = self.play_time
+                    self.state = GameState.WIN
+            if self.player.update(self.terrain):
+                self.seed_destroyed_count += 1
+                if self.seed_destroyed_count >= 10:
+                    self.finish_time = self.play_time
+                    self.state = GameState.WIN
             self.gardener.update(self.terrain, self.player)
             
             # Update snakes
             for snake in self.snakes:
                 snake.update(self.terrain)
+
+            self.snake_spawn_timer -= 1
+            if self.snake_spawn_timer <= 0:
+                sx, sy = self._find_safe_snake_spawn()
+                self.snakes.append(Snake(sx, sy))
+                self.snake_spawn_timer = 600
                 
             self.camera.set_position(self.player.x + self.player.width/2, self.player.y + self.player.height/2)
             
@@ -910,6 +1344,7 @@ class MoleGame:
                 for segment in snake.segments:
                     if abs(self.player.x - segment[0]) < 0.9 and abs(self.player.y - segment[1]) < 0.9:
                         self.game_over_reason = "snake"
+                        self.finish_time = self.play_time
                         self.state = GameState.GAME_OVER
                         break
                 if self.state == GameState.GAME_OVER:
@@ -918,11 +1353,13 @@ class MoleGame:
             # Check if player and gardener coordinates overlap (within 1 block)
             if self.state != GameState.GAME_OVER and abs(self.player.x - self.gardener.x) < 1.0 and abs(self.player.y - self.gardener.y) < 1.0:
                 self.game_over_reason = "gardener"
+                self.finish_time = self.play_time
                 self.state = GameState.GAME_OVER
                 
             # Check if player fell out of the world
             if self.state != GameState.GAME_OVER and self.player.y > 30:
                 self.game_over_reason = "fall"
+                self.finish_time = self.play_time
                 self.state = GameState.GAME_OVER
     
     def draw(self) -> None:
@@ -938,7 +1375,14 @@ class MoleGame:
             self.draw_pause_screen()
         elif self.state == GameState.GAME_OVER:
             self.draw_game_over_screen()
-        
+        elif self.state == GameState.WIN:
+            self.draw_win_screen()
+
+        # Letterbox: fill display black, then blit scaled virtual surface centred
+        rect = self._get_render_rect()
+        scaled = pygame.transform.smoothscale(self.screen, (rect.width, rect.height))
+        self.display.fill((0, 0, 0))
+        self.display.blit(scaled, (rect.x, rect.y))
         pygame.display.flip()
         
     def draw_pause_screen(self) -> None:
@@ -991,6 +1435,14 @@ class MoleGame:
         subtitle_rect = subtitle_text.get_rect(center=(SCREEN_WIDTH // 2, 280))
         self.screen.blit(subtitle_text, subtitle_rect)
         
+        # Show how long the run lasted before game over
+        fin_s = self.finish_time // 60
+        fin_ms = (self.finish_time % 60) * 100 // 60
+        time_str = f"Time survived: {fin_s // 60:02d}:{fin_s % 60:02d}.{fin_ms:02d}"
+        time_text = self.font_small.render(time_str, True, (220, 220, 220))
+        time_rect = time_text.get_rect(center=(SCREEN_WIDTH // 2, 330))
+        self.screen.blit(time_text, time_rect)
+
         self.play_again_button.draw(self.screen)
         
         # Position Exit button lower for game over screen
@@ -999,16 +1451,52 @@ class MoleGame:
         self.exit_to_home_button.draw(self.screen)
         self.exit_to_home_button.rect.y = orig_y  # Restore
     
+    def draw_win_screen(self) -> None:
+        self.draw_playing_screen()
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(200)
+        overlay.fill((30, 100, 30))
+        self.screen.blit(overlay, (0, 0))
+        
+        title_text = self.font_large.render("YOU WIN!", True, (255, 215, 0))
+        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, 200))
+        self.screen.blit(title_text, title_rect)
+        
+        subtitle_text = self.font_small.render(
+            "You destroyed 10 seeds and saved the garden!", True, TEXT_WHITE
+        )
+        subtitle_rect = subtitle_text.get_rect(center=(SCREEN_WIDTH // 2, 280))
+        self.screen.blit(subtitle_text, subtitle_rect)
+
+        # Show the final completion time
+        fin_s = self.finish_time // 60
+        fin_ms = (self.finish_time % 60) * 100 // 60
+        time_str = f"Time: {fin_s // 60:02d}:{fin_s % 60:02d}.{fin_ms:02d}"
+        time_text = self.font_medium.render(time_str, True, (255, 215, 0))
+        time_rect = time_text.get_rect(center=(SCREEN_WIDTH // 2, 340))
+        self.screen.blit(time_text, time_rect)
+
+        self.play_again_button.draw(self.screen)
+        orig_y = self.exit_to_home_button.rect.y
+        self.exit_to_home_button.rect.y = 500
+        self.exit_to_home_button.draw(self.screen)
+        self.exit_to_home_button.rect.y = orig_y  # Restore
+    
     def draw_playing_screen(self) -> None:
-        self.screen.fill((135, 206, 235))  # Sky blue background
+        # Sky gradient + clouds (drawn before terrain so terrain overlaps)
+        self.clouds.draw_sky(self.screen)
+        self.clouds.draw_clouds(self.screen, self.camera)
         
         self.terrain.draw(self.screen, self.camera)
-        self.player.draw(self.screen, self.camera)
+        self.player.draw(self.screen, self.camera, self.texture_manager)
         self.gardener.draw(self.screen, self.camera, self.texture_manager)
         
         # Draw snakes
         for snake in self.snakes:
             snake.draw(self.screen, self.camera)
+
+        # Draw block-break particles on top of everything
+        self.particles.draw(self.screen, self.camera)
             
         pos_text = self.font_tiny.render(
             f"X: {self.player.x:.1f} Y: {self.player.y:.1f}", 
@@ -1018,6 +1506,23 @@ class MoleGame:
         self.screen.blit(pos_text, pos_rect)
         
         self.minimap.draw(self.screen, self.player, self.terrain, self.gardener, self.snakes)
+        
+        seed_text = self.font_tiny.render(
+            f"Seeds destroyed: {self.seed_destroyed_count} / 10",
+            True, TEXT_WHITE
+        )
+        seed_rect = seed_text.get_rect(topleft=(10, 30))
+        self.screen.blit(seed_text, seed_rect)
+
+        # Live timer displayed in the HUD
+        elapsed_s = self.play_time // 60
+        elapsed_ms = (self.play_time % 60) * 100 // 60  # 2-digit centiseconds approximation
+        timer_text = self.font_small.render(
+            f"Time: {elapsed_s // 60:02d}:{elapsed_s % 60:02d}.{elapsed_ms:02d}",
+            True, ACCENT_ORANGE
+        )
+        timer_rect = timer_text.get_rect(center=(SCREEN_WIDTH // 2, 15))
+        self.screen.blit(timer_text, timer_rect)
         
         controls_text = self.font_tiny.render(
             "A/D: Move | W/SPACE: Jump | LEFT CLICK: Dig | ESC: Pause",
