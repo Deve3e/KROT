@@ -1,110 +1,158 @@
-# KROT - 3D Minecraft-Style Mole Game
+# KROT — Garden Defense Challenge
 
-A 3D first-person mole escape game where you dig through underground tunnels and navigate above ground to escape the garden!
+A 2D platformer where you play as a mole trying to survive underground. Dig through soil, dodge the gardener on the surface, avoid venomous snakes underground, and destroy 10 seeds to win!
+
+---
+
+## Objective
+
+**Destroy 10 seeds** planted by the gardener before the gardener or snakes catch you.
+
+---
 
 ## Features
 
-- **3D First-Person Perspective**: Full Minecraft-style 3D rendering with mouse look
-- **Dual Layer System**: Switch between underground and above-ground views
-- **Block-Based Terrain**: Dig through soil blocks to create tunnels
-- **Texture System**: Customizable block textures
-- **Real-time 3D Rendering**: Perspective projection with depth sorting
+- **2D Platformer**: Side-scrolling platformer with gravity, jumping, and digging
+- **Procedural Terrain**: Randomly generated soil, grass, stone, and plant seeds each run
+- **Enemy AI — Gardener**: Patrols the surface, chases when it spots you, repairs the garden, and plants new seeds
+- **Enemy AI — Snakes**: Slither through underground soil (pass through soil, blocked by stone), growing in number over time
+- **Minimap**: Live top-down overview showing your position, the gardener, and all snakes
+- **Particle Effects**: Block-break debris particles for soil, grass, stone, and plants
+- **Drifting Clouds**: Animated sky with fluffy clouds above ground
+- **Animated Menus**: Scrolling background on the home, instructions, and settings screens
+- **Playful Buttons**: Color-coded pill buttons with hover animations and drop shadows
+- **Settings Panel**: Adjustable volume sliders, Sound FX toggle, and rebindable controls
+
+---
 
 ## Controls
 
 ### Menu Navigation
-- **Mouse**: Click buttons to navigate menus
-- **ESC**: Return to main menu
+| Input | Action |
+|-------|--------|
+| **Mouse** | Click buttons to navigate |
+| **ESC** | Return to previous screen / Pause |
+| **F11** | Toggle fullscreen |
 
-### 3D Gameplay
-- **Mouse**: Look around (camera rotation)
-- **WASD**: Move forward/backward and strafe left/right
-- **Q**: Dig up (remove blocks above)
-- **E**: Dig down (remove blocks below)
-- **TAB**: Switch between underground and above-ground layers
-- **ESC**: Return to main menu
+### Gameplay (defaults — rebindable in Settings)
+| Input | Action |
+|-------|--------|
+| **A** | Move left |
+| **D** | Move right |
+| **W / SPACE** | Jump |
+| **Left Click** | Dig the block under the cursor (up to 4 blocks away) |
+| **ESC** | Pause |
+
+> Stone blocks cannot be dug. Seeds require holding for a moment to destroy.
+
+---
+
+## Enemies
+
+### 🌿 Gardener
+- Patrols the grass surface and wanders randomly
+- Spots you if you're at the same vertical level and chases at higher speed
+- Plants new seeds while wandering
+- Repairs holes in the grass as it walks
+- Climbs back to the surface if it falls underground
+
+### 🐍 Snakes
+- Spawn underground and slither in random directions
+- Pass through soil freely but are blocked by stone
+- More snakes spawn over time (every ~10 seconds)
+- Contact with any segment ends the run instantly
+
+---
+
+## Win / Lose Conditions
+
+| Condition | Result |
+|-----------|--------|
+| Destroy **10 seeds** | **WIN** |
+| Gardener touches you | **CAUGHT** — Game Over |
+| Snake touches you | **BITTEN** — Game Over |
+| Fall below the world | **FELL OUT** — Game Over |
+
+Your survival time is displayed on each end screen.
+
+---
+
+## Settings
+
+Open **Settings** from the main menu or pause screen.
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| Master Volume | Slider | Overall game volume (0–100%) |
+| Music Volume | Slider | Music volume (0–100%) |
+| Sound FX | Toggle | Enable / disable sound effects |
+| Move Left | Keybind | Default: **A** |
+| Move Right | Keybind | Default: **D** |
+| Jump | Keybind | Default: **W** |
+| Dig (hold) | Keybind | Placeholder (actual dig is mouse click) |
+
+> Click **SAVE** to apply keybind changes. Click **BACK** to discard.
+
+---
 
 ## Texture System
 
-The game supports custom textures for all block types. Place your texture files in the `game/textures/` folder.
+Place PNG files in `textures/` to override any block appearance.
 
-### Supported Textures
+| File | Block |
+|------|-------|
+| `soil.png` | Underground soil |
+| `soil2.png`, `soil3.png`, … | Soil variants (auto-loaded) |
+| `grass.png` | Surface grass |
+| `plant.png` | Seeds / plants |
+| `stone.png` | Unbreakable stone |
+| `player.png` | Mole (player) |
+| `gardener.png` | Gardener enemy |
+| `snake_head.png` | Snake head segment |
+| `snake_tail.png` | Snake tail segment |
+| `snake_body1.png`, `snake_body2.png`, … | Snake body variants (auto-loaded) |
+| `sky.png` | Sky fallback |
 
-- `soil.png` - Underground soil blocks
-- `grass.png` - Above-ground grass blocks
-- `plant.png` - Vegetable/plant obstacles
-- `sky.png` - Sky background (currently unused)
+All textures are scaled to 40×40 pixels. Missing files fall back to colored shapes.
 
-### Texture Requirements
-
-- **Format**: PNG, JPG, or BMP
-- **Recommended Size**: 32x32 or 64x64 pixels
-- **Square Aspect Ratio**: Width should equal height
-- **Transparency**: PNG files support transparency
-
-### Adding Custom Textures
-
-1. Create or find texture images
-2. Save them with the correct filenames in `game/textures/`
-3. Restart the game to load new textures
-
-### Generating Placeholder Textures
-
-Run the included texture generator to create basic placeholder textures:
-
+To generate placeholder textures:
 ```bash
-python game/generate_textures.py
+python generate_textures.py
 ```
 
-This will create simple colored textures with basic patterns that you can replace with your own art.
-
-## Game Mechanics
-
-### Underground Layer
-- Navigate through 3D soil blocks
-- Dig tunnels by removing blocks with Q/E keys
-- Avoid getting trapped by digging strategically
-
-### Above-Ground Layer
-- Navigate the garden surface
-- Avoid gardener (future feature)
-- Find escape holes to win
-
-### Layer Switching
-- Use TAB to switch between layers
-- Each layer has its own terrain and obstacles
-- Plan your escape route across both layers
-
-## Development
-
-The game uses a modular architecture:
-
-- `TextureManager`: Handles loading and managing block textures
-- `Camera3D`: First-person 3D camera with mouse look
-- `Terrain3D`: Block-based 3D world generation and rendering
-- `Player`: Mole character with 3D movement and digging
-
-## Future Features
-
-- Gardener AI that patrols and blocks escape holes
-- Multiple escape holes with different buffs/debuffs
-- Sound effects and background music
-- Save/load game progress
-- More block types and terrain features
+---
 
 ## File Structure
 
 ```
 game/
-├── main.py                 # Main game file
-├── generate_textures.py    # Texture generator script
-├── textures/               # Block texture files
-│   ├── soil.png
+├── main.py                 # All game code
+├── generate_textures.py    # Generates placeholder textures
+├── textures/               # Block & character textures
+│   ├── soil.png / soil2.png / soil3.png / soil4.png
 │   ├── grass.png
 │   ├── plant.png
-│   └── sky.png
-└── addinfo/               # Additional assets
-    └── bg_image.png       # Menu background
+│   ├── stone.png
+│   ├── player.png
+│   ├── gardener.png
+│   ├── snake_head.png
+│   ├── snake_tail.png
+│   └── snake_body1.png … snake_body4.png
+└── addinfo/
+    └── bg_image.png        # Animated menu background
 ```
 
-Enjoy digging your way to freedom! 🐭
+---
+
+## Running the Game
+
+```bash
+pip install pygame
+python main.py
+```
+
+Requires **Python 3.10+** and **pygame 2.x**.
+
+---
+
+Good luck escaping the garden! 🐭
