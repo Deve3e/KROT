@@ -22,6 +22,18 @@ TEXT_WHITE = (255, 255, 255)
 ACCENT_ORANGE = (255, 165, 0)  # Orange for accents
 BUTTON_HOVER = (255, 154, 66)  # Bright gold on hover
 
+# Playful button color themes: (base_color, shadow_color, outline_color, text_color)
+BUTTON_THEMES = {
+    "play":         ((60, 200, 80),   (20, 100, 30),  (20, 160, 50),   (255, 255, 255)),
+    "instructions": ((60, 140, 230),  (20, 60, 140),  (30, 100, 200),  (255, 255, 255)),
+    "settings":     ((160, 80, 220),  (80, 30, 130),  (130, 50, 190),  (255, 255, 255)),
+    "resume":       ((60, 200, 80),   (20, 100, 30),  (20, 160, 50),   (255, 255, 255)),
+    "play_again":   ((255, 180, 0),   (140, 80, 0),   (210, 130, 0),   (60, 30, 0)),
+    "exit":         ((220, 60, 60),   (110, 20, 20),  (180, 30, 30),   (255, 255, 255)),
+    "back":         ((100, 180, 220), (30, 80, 120),  (60, 140, 190),  (255, 255, 255)),
+    "default":      ((255, 190, 80),  (140, 80, 10),  (210, 130, 20),  (50, 20, 0)),
+}
+
 
 class TextureManager:
     """Manages block textures for 2D rendering"""
@@ -346,12 +358,14 @@ class Player:
         self.vy = 0.0
         self.is_on_ground = False
         
-    def handle_input(self, keys, camera: Camera2D, terrain: Terrain2D, mouse_buttons, mouse_pos) -> bool:
+    def handle_input(self, keys, camera: Camera2D, terrain: Terrain2D, mouse_buttons, mouse_pos,
+                     key_left: int = 97, key_right: int = 100,
+                     key_jump: int = 119) -> bool:
         destroyed_seed = False
         dx = 0
-        if keys[pygame.K_a]:
+        if keys[key_left]:
             dx -= self.speed
-        if keys[pygame.K_d]:
+        if keys[key_right]:
             dx += self.speed
             
         if dx != 0:
@@ -359,7 +373,7 @@ class Player:
             if not self._check_collision(new_x, self.y, terrain):
                 self.x = new_x
                 
-        if (keys[pygame.K_SPACE] or keys[pygame.K_w]) and self.is_on_ground:
+        if (keys[pygame.K_SPACE] or keys[key_jump]) and self.is_on_ground:
             self.vy = -0.4
             self.is_on_ground = False
             
@@ -1021,28 +1035,333 @@ class CloudSystem:
 
 
 class Button:
-    """Button class for UI elements"""
-    def __init__(self, x: int, y: int, width: int, height: int, text: str, font_size: int = 32):
+    """Playful, colorful button class for UI elements."""
+
+    # Map keywords in button text to a color theme name
+    _THEME_MAP = [
+        ("PLAY AGAIN",    "play_again"),
+        ("PLAY",          "play"),
+        ("HOW TO",        "instructions"),
+        ("RESUME",        "resume"),
+        ("SETTINGS",      "settings"),
+        ("EXIT",          "exit"),
+        ("QUIT",          "exit"),
+        ("BACK",          "back"),
+    ]
+
+    def __init__(self, x: int, y: int, width: int, height: int, text: str,
+                 font_size: int = 32, theme: str = ""):
         self.rect = pygame.Rect(x, y, width, height)
         self.text = text
         self.font_size = font_size
         self.is_hovered = False
         self.font = pygame.font.Font(None, font_size)
-        
+        self._hover_anim = 0.0   # 0.0 → 1.0, animated toward target each frame
+
+        # Pick theme automatically if not specified
+        if theme:
+            self._theme = theme
+        else:
+            upper = text.upper()
+            self._theme = "default"
+            for keyword, tname in self._THEME_MAP:
+                if keyword in upper:
+                    self._theme = tname
+                    break
+
+    def _lerp_color(self, c1: tuple, c2: tuple, t: float) -> tuple:
+        return (
+            int(c1[0] + (c2[0] - c1[0]) * t),
+            int(c1[1] + (c2[1] - c1[1]) * t),
+            int(c1[2] + (c2[2] - c1[2]) * t),
+        )
+
     def draw(self, surface: pygame.Surface) -> None:
-        color = BUTTON_HOVER if self.is_hovered else (255, 190, 133)
-        pygame.draw.rect(surface, color, self.rect, border_radius=10)
-        pygame.draw.rect(surface, (255, 154, 66), self.rect, 3, border_radius=10)
-        
-        text_surface = self.font.render(self.text, True, BG_COLOR if self.is_hovered else TEXT_WHITE)
-        text_rect = text_surface.get_rect(center=self.rect.center)
-        surface.blit(text_surface, text_rect)
-        
+        # Smoothly animate hover factor
+        target = 1.0 if self.is_hovered else 0.0
+        self._hover_anim += (target - self._hover_anim) * 0.25
+        t = self._hover_anim
+
+        base, shadow_col, outline_col, text_col = BUTTON_THEMES.get(
+            self._theme, BUTTON_THEMES["default"]
+        )
+
+        # Brighten base slightly on hover
+        hover_base = tuple(min(255, int(c * 1.25)) for c in base)
+        fill_color = self._lerp_color(base, hover_base, t)
+
+        # Scale the button up slightly on hover
+        expand = int(4 * t)
+        draw_rect = self.rect.inflate(expand * 2, expand * 2)
+        radius = draw_rect.height // 2  # pill shape
+
+        # 1. Drop shadow
+        shadow_rect = draw_rect.move(3, 5)
+        pygame.draw.rect(surface, shadow_col, shadow_rect, border_radius=radius)
+
+        # 2. Main fill
+        pygame.draw.rect(surface, fill_color, draw_rect, border_radius=radius)
+
+        # 3. Highlight stripe (top sheen)
+        shine_rect = pygame.Rect(
+            draw_rect.x + radius,
+            draw_rect.y + 4,
+            draw_rect.width - radius * 2,
+            draw_rect.height // 3,
+        )
+        shine_surf = pygame.Surface((shine_rect.width, shine_rect.height), pygame.SRCALPHA)
+        shine_surf.fill((255, 255, 255, 55))
+        surface.blit(shine_surf, shine_rect.topleft)
+
+        # 4. Outline
+        outline_color = self._lerp_color(outline_col,
+                                         tuple(min(255, int(c * 1.3)) for c in outline_col), t)
+        pygame.draw.rect(surface, outline_color, draw_rect, 3, border_radius=radius)
+
+        # 5. Text (bold shadow + main)
+        font_size_big = int(self.font_size * (1.0 + 0.06 * t))
+        try:
+            font = pygame.font.Font(None, font_size_big)
+        except Exception:
+            font = self.font
+        label = font.render(self.text, True, text_col)
+        shadow_label = font.render(self.text, True, shadow_col)
+        cx, cy = draw_rect.centerx, draw_rect.centery
+        surface.blit(shadow_label, shadow_label.get_rect(center=(cx + 1, cy + 2)))
+        surface.blit(label, label.get_rect(center=(cx, cy)))
+
     def is_clicked(self, mouse_pos: tuple) -> bool:
         return self.rect.collidepoint(mouse_pos)
-    
+
     def update_hover(self, mouse_pos: tuple) -> None:
         self.is_hovered = self.rect.collidepoint(mouse_pos)
+
+
+# ---------------------------------------------------------------------------
+# Settings widgets
+# ---------------------------------------------------------------------------
+
+class SettingsData:
+    """Central store for all game settings values."""
+    def __init__(self):
+        self.master_volume: float = 1.0   # 0.0 – 1.0
+        self.music_volume:  float = 0.8   # 0.0 – 1.0
+        self.sfx_on:  bool = True
+        self.music_on: bool = True
+        # Keybinds (pygame key constants)
+        self.key_left:  int = pygame.K_a
+        self.key_right: int = pygame.K_d
+        self.key_jump:  int = pygame.K_w
+        self.key_dig:   int = pygame.K_SPACE  # placeholder – actual dig is mouse click
+
+
+class Slider:
+    """Horizontal drag slider that stores a 0–1 float value."""
+    TRACK_H   = 8
+    KNOB_R    = 12
+    TRACK_COL = (60, 60, 60)
+    FILL_COL  = (60, 200, 80)
+    KNOB_COL  = (255, 255, 255)
+    KNOB_HOV  = (200, 255, 210)
+
+    def __init__(self, x: int, y: int, width: int, label: str, value: float = 1.0):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.label = label
+        self.value = max(0.0, min(1.0, value))
+        self.dragging = False
+        self._hovered = False
+        self._font = pygame.font.Font(None, 30)
+        self._val_font = pygame.font.Font(None, 28)
+
+    @property
+    def track_rect(self) -> pygame.Rect:
+        return pygame.Rect(self.x, self.y - self.TRACK_H // 2, self.width, self.TRACK_H)
+
+    @property
+    def knob_x(self) -> int:
+        return int(self.x + self.value * self.width)
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        """Return True if the slider consumed the event."""
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            kx = self.knob_x
+            ky = self.y
+            if math.hypot(event.pos[0] - kx, event.pos[1] - ky) <= self.KNOB_R + 6 \
+                    or self.track_rect.collidepoint(event.pos):
+                self.dragging = True
+                self._update_from_mouse(event.pos[0])
+                return True
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.dragging:
+                self.dragging = False
+                return True
+        elif event.type == pygame.MOUSEMOTION:
+            self._hovered = (
+                math.hypot(event.pos[0] - self.knob_x, event.pos[1] - self.y) <= self.KNOB_R + 6
+            )
+            if self.dragging:
+                self._update_from_mouse(event.pos[0])
+                return True
+        return False
+
+    def _update_from_mouse(self, mx: int) -> None:
+        self.value = max(0.0, min(1.0, (mx - self.x) / self.width))
+
+    def draw(self, surface: pygame.Surface) -> None:
+        # Label
+        label_surf = self._font.render(self.label, True, TEXT_WHITE)
+        surface.blit(label_surf, (self.x, self.y - 28))
+        # Percentage
+        pct = f"{int(self.value * 100)}%"
+        pct_surf = self._val_font.render(pct, True, ACCENT_ORANGE)
+        surface.blit(pct_surf, (self.x + self.width + 14, self.y - 12))
+        # Track background
+        tr = self.track_rect
+        pygame.draw.rect(surface, self.TRACK_COL, tr, border_radius=4)
+        # Filled portion
+        fill_w = int(self.value * self.width)
+        if fill_w > 0:
+            pygame.draw.rect(surface, self.FILL_COL,
+                             pygame.Rect(tr.x, tr.y, fill_w, tr.height), border_radius=4)
+        # Knob
+        knob_col = self.KNOB_HOV if (self.dragging or self._hovered) else self.KNOB_COL
+        pygame.draw.circle(surface, (30, 30, 30), (self.knob_x, self.y), self.KNOB_R + 2)
+        pygame.draw.circle(surface, knob_col, (self.knob_x, self.y), self.KNOB_R)
+
+
+class Toggle:
+    """On/Off pill toggle switch."""
+    W, H = 64, 32
+    ON_COL  = (60, 200, 80)
+    OFF_COL = (120, 40, 40)
+    KNOB_COL = (255, 255, 255)
+
+    def __init__(self, x: int, y: int, label: str, value: bool = True):
+        self.x = x
+        self.y = y
+        self.label = label
+        self.value = value
+        self._anim = 1.0 if value else 0.0
+        self._font = pygame.font.Font(None, 30)
+        self._hovered = False
+
+    @property
+    def rect(self) -> pygame.Rect:
+        return pygame.Rect(self.x, self.y, self.W, self.H)
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                self.value = not self.value
+                return True
+        elif event.type == pygame.MOUSEMOTION:
+            self._hovered = self.rect.collidepoint(event.pos)
+        return False
+
+    def draw(self, surface: pygame.Surface) -> None:
+        # Animate knob
+        target = 1.0 if self.value else 0.0
+        self._anim += (target - self._anim) * 0.25
+        t = self._anim
+        # Label
+        label_surf = self._font.render(self.label, True, TEXT_WHITE)
+        surface.blit(label_surf, (self.x, self.y - 26))
+        # Track
+        r = self.H // 2
+        bg_col = (
+            int(self.OFF_COL[0] + (self.ON_COL[0] - self.OFF_COL[0]) * t),
+            int(self.OFF_COL[1] + (self.ON_COL[1] - self.OFF_COL[1]) * t),
+            int(self.OFF_COL[2] + (self.ON_COL[2] - self.OFF_COL[2]) * t),
+        )
+        pygame.draw.rect(surface, bg_col, self.rect, border_radius=r)
+        if self._hovered:
+            pygame.draw.rect(surface, (255, 255, 255), self.rect, 2, border_radius=r)
+        # State label
+        state_surf = self._font.render("ON" if self.value else "OFF", True,
+                                       (255, 255, 255) if self.value else (180, 100, 100))
+        state_x = self.x + self.W + 12
+        surface.blit(state_surf, (state_x, self.y + 5))
+        # Knob
+        knob_x = int(self.x + r + t * (self.W - self.H))
+        knob_y = self.y + r
+        pygame.draw.circle(surface, (30, 30, 30), (knob_x, knob_y), r - 2)
+        pygame.draw.circle(surface, self.KNOB_COL, (knob_x, knob_y), r - 4)
+
+
+
+class KeybindRow:
+    """A settings row that shows an action name + current key, click to rebind."""
+    W, H = 320, 40
+
+    def __init__(self, x: int, y: int, action: str, key: int):
+        self.x = x
+        self.y = y
+        self.action = action
+        self.key = key           # pygame key constant
+        self.awaiting = False    # True while listening for a new key press
+        self._hovered = False
+        self._font_lbl = pygame.font.Font(None, 30)
+        self._font_key = pygame.font.Font(None, 28)
+
+    @property
+    def rect(self) -> pygame.Rect:
+        return pygame.Rect(self.x, self.y, self.W, self.H)
+
+    @property
+    def key_name(self) -> str:
+        name = pygame.key.name(self.key)
+        return name.upper() if name else "?"
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                self.awaiting = True
+                return True
+        elif event.type == pygame.MOUSEMOTION:
+            self._hovered = self.rect.collidepoint(event.pos)
+        elif event.type == pygame.KEYDOWN and self.awaiting:
+            if event.key != pygame.K_ESCAPE:
+                self.key = event.key
+            self.awaiting = False
+            return True
+        return False
+
+    def draw(self, surface: pygame.Surface) -> None:
+        # Row background
+        if self.awaiting:
+            bg_col = (80, 60, 20)
+            border_col = (255, 200, 0)
+        elif self._hovered:
+            bg_col = (55, 55, 55)
+            border_col = (120, 120, 120)
+        else:
+            bg_col = (40, 40, 40)
+            border_col = (70, 70, 70)
+        pygame.draw.rect(surface, bg_col, self.rect, border_radius=8)
+        pygame.draw.rect(surface, border_col, self.rect, 2, border_radius=8)
+        # Action label
+        lbl = self._font_lbl.render(self.action, True, TEXT_WHITE)
+        surface.blit(lbl, (self.x + 14, self.y + self.H // 2 - lbl.get_height() // 2))
+        # Key badge
+        if self.awaiting:
+            badge_text = "Press a key..."
+            badge_col = (255, 200, 0)
+            text_col = (30, 20, 0)
+        else:
+            badge_text = self.key_name
+            badge_col = (60, 140, 220)
+            text_col = (255, 255, 255)
+        key_surf = self._font_key.render(badge_text, True, text_col)
+        badge_w = max(60, key_surf.get_width() + 20)
+        badge_h = 28
+        badge_x = self.x + self.W - badge_w - 10
+        badge_y = self.y + self.H // 2 - badge_h // 2
+        pygame.draw.rect(surface, badge_col,
+                         pygame.Rect(badge_x, badge_y, badge_w, badge_h), border_radius=6)
+        surface.blit(key_surf, (badge_x + (badge_w - key_surf.get_width()) // 2,
+                                badge_y + (badge_h - key_surf.get_height()) // 2))
 
 
 class MoleGame:
@@ -1146,6 +1465,41 @@ class MoleGame:
         # Game Over buttons
         self.play_again_button = Button(button_x, 400, button_width, button_height, "PLAY AGAIN")
 
+        # ---- Settings data & widgets ----
+        self.settings = SettingsData()
+        cx = SCREEN_WIDTH // 2
+        slider_w = 320
+        sx = cx - slider_w // 2
+
+        # --- Sound section ---
+        self._s_master = Slider(sx, 180, slider_w, "Master Volume", self.settings.master_volume)
+        self._s_music  = Slider(sx, 265, slider_w, "Music Volume",  self.settings.music_volume)
+        self._t_sfx    = Toggle(sx, 330, "Sound FX",  self.settings.sfx_on)
+
+        # --- Keybind section ---
+        kb_x = cx - KeybindRow.W // 2
+        self._kb_left  = KeybindRow(kb_x, 420, "Move Left",  self.settings.key_left)
+        self._kb_right = KeybindRow(kb_x, 470, "Move Right", self.settings.key_right)
+        self._kb_jump  = KeybindRow(kb_x, 520, "Jump",       self.settings.key_jump)
+        self._kb_dig   = KeybindRow(kb_x, 570, "Dig (hold)", self.settings.key_dig)
+
+        self._settings_sound_widgets = [
+            self._s_master, self._s_music,
+            self._t_sfx,
+        ]
+        self._settings_kb_widgets = [
+            self._kb_left, self._kb_right, self._kb_jump, self._kb_dig,
+        ]
+        self._settings_widgets = self._settings_sound_widgets + self._settings_kb_widgets
+        self._settings_back_btn = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
+        self._settings_save_btn = Button(SCREEN_WIDTH - 220, SCREEN_HEIGHT - 80, 170, 50, "SAVE",
+                                         theme="play")
+
+        # Active keybinds used by the game loop (updated on Save)
+        self.active_key_left  = self.settings.key_left
+        self.active_key_right = self.settings.key_right
+        self.active_key_jump  = self.settings.key_jump
+
     def _is_safe_snake_spawn(self, x: float, y: float) -> bool:
         bx = int(math.floor(x))
         by = int(math.floor(y))
@@ -1198,7 +1552,7 @@ class MoleGame:
         self.screen.blit(footer_text, footer_rect)
         
     def draw_instructions_screen(self) -> None:
-        self.screen.fill(BG_COLOR)
+        self._draw_animated_bg(overlay_alpha=155)
         
         title_text = self.font_large.render("HOW TO PLAY", True, GRASS_GREEN)
         title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, 40))
@@ -1236,28 +1590,47 @@ class MoleGame:
         back_button.draw(self.screen)
         
     def draw_settings_screen(self) -> None:
-        self.screen.fill(BG_COLOR)
-        
+        self._draw_animated_bg(overlay_alpha=155)
+
+        cx = SCREEN_WIDTH // 2
+        font_sec = pygame.font.Font(None, 34)
+
+        # ── Title ──
         title_text = self.font_large.render("SETTINGS", True, GRASS_GREEN)
-        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, 40))
-        self.screen.blit(title_text, title_rect)
-        
-        settings_text = [
-            "Volume: 100%",
-            "Difficulty: Normal",
-            "Sound Effects: ON",
-            "Music: ON",
-        ]
-        
-        y_offset = 200
-        for setting in settings_text:
-            text = self.font_small.render(setting, True, TEXT_WHITE)
-            text_rect = text.get_rect(center=(SCREEN_WIDTH // 2, y_offset))
-            self.screen.blit(text, text_rect)
-            y_offset += 80
-        
-        back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
-        back_button.draw(self.screen)
+        self.screen.blit(title_text, title_text.get_rect(center=(cx, 55)))
+
+        # ── SOUND section header ──
+        sec = font_sec.render("SOUND", True, ACCENT_ORANGE)
+        self.screen.blit(sec, (cx - 160, 110))
+        pygame.draw.line(self.screen, (100, 80, 30), (cx - 160, 128), (cx + 160, 128), 1)
+
+        # ── CONTROLS section header ──
+        sec2 = font_sec.render("CONTROLS", True, ACCENT_ORANGE)
+        self.screen.blit(sec2, (cx - 160, 385))
+        pygame.draw.line(self.screen, (100, 80, 30), (cx - 160, 403), (cx + 160, 403), 1)
+        hint = pygame.font.Font(None, 22).render(
+            "Click a row, then press a key to rebind", True, (160, 160, 160))
+        self.screen.blit(hint, (cx - 160, 405))
+
+        # Sync pending values (not yet committed)
+        self.settings.master_volume = self._s_master.value
+        self.settings.music_volume  = self._s_music.value
+        self.settings.sfx_on        = self._t_sfx.value
+        self.settings.key_left      = self._kb_left.key
+        self.settings.key_right     = self._kb_right.key
+        self.settings.key_jump      = self._kb_jump.key
+        self.settings.key_dig       = self._kb_dig.key
+
+        # Draw all widgets
+        for widget in self._settings_widgets:
+            widget.draw(self.screen)
+
+        # Back + Save buttons
+        mouse_pos = self._scale_mouse_pos(pygame.mouse.get_pos())
+        self._settings_back_btn.update_hover(mouse_pos)
+        self._settings_back_btn.draw(self.screen)
+        self._settings_save_btn.update_hover(mouse_pos)
+        self._settings_save_btn.draw(self.screen)
         
     def _get_render_rect(self) -> pygame.Rect:
         """Return the letterboxed rect where the virtual surface is drawn on the display."""
@@ -1283,7 +1656,18 @@ class MoleGame:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-            
+
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if self.state == GameState.SETTINGS:
+                    mouse_pos = self._scale_mouse_pos(event.pos)
+                    up_proxy = type('_E', (), {
+                        'type': pygame.MOUSEBUTTONUP,
+                        'button': event.button,
+                        'pos': mouse_pos,
+                    })()
+                    for widget in self._settings_sound_widgets:
+                        widget.handle_event(up_proxy)
+
             elif event.type == pygame.MOUSEMOTION:
                 mouse_pos = self._scale_mouse_pos(event.pos)
                 if self.state == GameState.HOME:
@@ -1298,6 +1682,12 @@ class MoleGame:
                 elif self.state in [GameState.GAME_OVER, GameState.WIN]:
                     self.play_again_button.update_hover(mouse_pos)
                     self.exit_to_home_button.update_hover(mouse_pos)
+                elif self.state == GameState.SETTINGS:
+                    proxy = type('_E', (), {
+                        'type': pygame.MOUSEMOTION, 'pos': mouse_pos
+                    })()
+                    for widget in self._settings_widgets:
+                        widget.handle_event(proxy)
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_pos = self._scale_mouse_pos(event.pos)
@@ -1336,9 +1726,26 @@ class MoleGame:
                         self.state = self.previous_state
                 
                 elif self.state == GameState.SETTINGS:
-                    back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
-                    if back_button.is_clicked(mouse_pos):
+                    if self._settings_back_btn.is_clicked(mouse_pos):
                         self.state = self.previous_state
+                    elif self._settings_save_btn.is_clicked(mouse_pos):
+                        # Commit keybinds to the active game keys
+                        self.active_key_left  = self._kb_left.key
+                        self.active_key_right = self._kb_right.key
+                        self.active_key_jump  = self._kb_jump.key
+                        self.settings.key_left  = self._kb_left.key
+                        self.settings.key_right = self._kb_right.key
+                        self.settings.key_jump  = self._kb_jump.key
+                        self.settings.key_dig   = self._kb_dig.key
+                        self.state = self.previous_state
+                    else:
+                        for widget in self._settings_widgets:
+                            widget.handle_event(
+                                type('_E', (), {
+                                    'type': pygame.MOUSEBUTTONDOWN,
+                                    'button': 1,
+                                    'pos': mouse_pos,
+                                })())
             
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F11:
@@ -1351,16 +1758,45 @@ class MoleGame:
                         self.display = pygame.display.set_mode(
                             (SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE
                         )
+                elif self.state == GameState.SETTINGS:
+                    # Forward to keybind rows first (they consume it if awaiting)
+                    consumed = False
+                    for kb in self._settings_kb_widgets:
+                        if kb.handle_event(event):
+                            consumed = True
+                            break
+                    if not consumed and event.key == pygame.K_ESCAPE:
+                        self.state = self.previous_state
                 elif event.key == pygame.K_ESCAPE:
                     if self.state == GameState.PLAYING:
                         self.state = GameState.PAUSED
                     elif self.state == GameState.PAUSED:
                         self.state = GameState.PLAYING
-                    elif self.state in [GameState.INSTRUCTIONS, GameState.SETTINGS]:
+                    elif self.state == GameState.INSTRUCTIONS:
                         self.state = self.previous_state
     
+    def _draw_animated_bg(self, overlay_alpha: int = 160) -> None:
+        """Blit the scrolling background image (same as home) then apply a dark overlay."""
+        if self.bg_image.image_loaded and self.bg_image.image_surface:
+            bg_x = self.bg_image.base_x + int(self.bg_offset)
+            self.screen.blit(self.bg_image.image_surface, (bg_x, 0))
+            if self.bg_image.image_width < SCREEN_WIDTH:
+                self.screen.blit(self.bg_image.image_surface, (bg_x + self.bg_image.image_width, 0))
+            elif bg_x > 0:
+                self.screen.blit(self.bg_image.image_surface, (bg_x - self.bg_image.image_width, 0))
+            elif bg_x + self.bg_image.image_width < SCREEN_WIDTH:
+                self.screen.blit(self.bg_image.image_surface, (bg_x + self.bg_image.image_width, 0))
+        else:
+            self.screen.fill(BG_COLOR)
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(overlay_alpha)
+        overlay.fill((10, 10, 10))
+        self.screen.blit(overlay, (0, 0))
+
     def update(self) -> None:
-        if self.state == GameState.HOME and self.bg_image.image_loaded:
+        # Keep background animating on home, instructions, and settings screens
+        if self.state in (GameState.HOME, GameState.INSTRUCTIONS, GameState.SETTINGS) \
+                and self.bg_image.image_loaded:
             self.bg_offset += self.bg_offset_direction * self.bg_offset_speed
             if self.bg_offset >= self.bg_offset_max:
                 self.bg_offset = self.bg_offset_max
@@ -1378,7 +1814,10 @@ class MoleGame:
             mouse_buttons = pygame.mouse.get_pressed()
             mouse_pos = self._scale_mouse_pos(pygame.mouse.get_pos())
             
-            if self.player.handle_input(keys, self.camera, self.terrain, mouse_buttons, mouse_pos):
+            if self.player.handle_input(keys, self.camera, self.terrain, mouse_buttons, mouse_pos,
+                                         key_left=self.active_key_left,
+                                         key_right=self.active_key_right,
+                                         key_jump=self.active_key_jump):
                 self.seed_destroyed_count += 1
                 if self.seed_destroyed_count >= 10:
                     self.finish_time = self.play_time
