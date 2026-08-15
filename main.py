@@ -3,6 +3,7 @@ import pygame
 import sys
 import math
 import os
+import json
 import random
 from enum import Enum
 from typing import Optional
@@ -189,6 +190,7 @@ class GameState(Enum):
     PAUSED = 5
     GAME_OVER = 6
     WIN = 7
+    LEADERBOARD = 8
 
 
 class Camera2D:
@@ -1138,8 +1140,55 @@ class Button:
 
 
 # ---------------------------------------------------------------------------
-# Settings widgets
+# Leaderboard
 # ---------------------------------------------------------------------------
+
+class Leaderboard:
+    """Loads, saves and queries the persistent top-score list."""
+    MAX_ENTRIES = 10
+
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.entries: list[dict] = []   # [{"time": frames, "label": "MM:SS.ms"}, ...]
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(self.filepath, "r") as f:
+                data = json.load(f)
+            self.entries = data.get("entries", [])
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            self.entries = []
+
+    def _save(self) -> None:
+        try:
+            with open(self.filepath, "w") as f:
+                json.dump({"entries": self.entries}, f, indent=2)
+        except OSError:
+            pass
+
+    @staticmethod
+    def frames_to_label(frames: int) -> str:
+        s   = frames // 60
+        ms  = (frames % 60) * 100 // 60
+        return f"{s // 60:02d}:{s % 60:02d}.{ms:02d}"
+
+    def add(self, frames: int) -> int:
+        """Insert a new time (in frames). Returns 1-based rank (1 = best)."""
+        entry = {"time": frames, "label": self.frames_to_label(frames)}
+        self.entries.append(entry)
+        self.entries.sort(key=lambda e: e["time"])
+        self.entries = self.entries[:self.MAX_ENTRIES]
+        self._save()
+        return next((i + 1 for i, e in enumerate(self.entries) if e["time"] == frames), -1)
+
+    def rank_of(self, frames: int) -> int:
+        """Return the 1-based rank of a given time, or -1 if not found."""
+        for i, e in enumerate(self.entries):
+            if e["time"] == frames:
+                return i + 1
+        return -1
+
 
 class SettingsData:
     """Central store for all game settings values."""
@@ -1407,7 +1456,12 @@ class MoleGame:
         
         self.previous_state = GameState.HOME
         self._init_buttons()
-        
+
+        # Persistent leaderboard
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.leaderboard = Leaderboard(os.path.join(base_dir, "leaderboard.json"))
+        self._last_win_rank: int = -1   # rank achieved in most recent win
+
         self.camera = Camera2D(SCREEN_WIDTH, SCREEN_HEIGHT, self.block_size)
         
         self.terrain = Terrain2D(self.texture_manager, self.block_size)
@@ -1456,6 +1510,10 @@ class MoleGame:
         self.instructions_button = Button(button_x, 400, button_width, button_height, "HOW TO PLAY")
         self.settings_button = Button(button_x, 500, button_width, button_height, "SETTINGS")
         self.quit_button = Button(button_x, 600, button_width, button_height, "EXIT")
+        # Leaderboard button — bottom right corner
+        self.leaderboard_button = Button(
+            SCREEN_WIDTH - 220, SCREEN_HEIGHT - 80, 200, 50,
+            "LEADERBOARD", theme="play_again")
         
         # Pause buttons
         self.resume_button = Button(button_x, 300, button_width, button_height, "RESUME")
@@ -1546,7 +1604,12 @@ class MoleGame:
         self.instructions_button.draw(self.screen)
         self.settings_button.draw(self.screen)
         self.quit_button.draw(self.screen)
-        
+
+        # Leaderboard button (bottom right)
+        mouse_pos = self._scale_mouse_pos(pygame.mouse.get_pos())
+        self.leaderboard_button.update_hover(mouse_pos)
+        self.leaderboard_button.draw(self.screen)
+
         footer_text = self.font_tiny.render("Can you escape the garden before the gardener catches you?", True, TEXT_WHITE)
         footer_rect = footer_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 30))
         self.screen.blit(footer_text, footer_rect)
@@ -1675,6 +1738,7 @@ class MoleGame:
                     self.instructions_button.update_hover(mouse_pos)
                     self.settings_button.update_hover(mouse_pos)
                     self.quit_button.update_hover(mouse_pos)
+                    self.leaderboard_button.update_hover(mouse_pos)
                 elif self.state == GameState.PAUSED:
                     self.resume_button.update_hover(mouse_pos)
                     self.pause_settings_button.update_hover(mouse_pos)
@@ -1703,6 +1767,9 @@ class MoleGame:
                         self.state = GameState.SETTINGS
                     elif self.quit_button.is_clicked(mouse_pos):
                         self.running = False
+                    elif self.leaderboard_button.is_clicked(mouse_pos):
+                        self.previous_state = GameState.HOME
+                        self.state = GameState.LEADERBOARD
                 
                 elif self.state == GameState.PAUSED:
                     if self.resume_button.is_clicked(mouse_pos):
@@ -1721,6 +1788,11 @@ class MoleGame:
                         self.state = GameState.HOME
                 
                 elif self.state == GameState.INSTRUCTIONS:
+                    back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
+                    if back_button.is_clicked(mouse_pos):
+                        self.state = self.previous_state
+
+                elif self.state == GameState.LEADERBOARD:
                     back_button = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
                     if back_button.is_clicked(mouse_pos):
                         self.state = self.previous_state
@@ -1772,7 +1844,7 @@ class MoleGame:
                         self.state = GameState.PAUSED
                     elif self.state == GameState.PAUSED:
                         self.state = GameState.PLAYING
-                    elif self.state == GameState.INSTRUCTIONS:
+                    elif self.state in [GameState.INSTRUCTIONS, GameState.LEADERBOARD]:
                         self.state = self.previous_state
     
     def _draw_animated_bg(self, overlay_alpha: int = 160) -> None:
@@ -1822,11 +1894,13 @@ class MoleGame:
                 if self.seed_destroyed_count >= 10:
                     self.finish_time = self.play_time
                     self.state = GameState.WIN
+                    self._last_win_rank = self.leaderboard.add(self.finish_time)
             if self.player.update(self.terrain):
                 self.seed_destroyed_count += 1
                 if self.seed_destroyed_count >= 10:
                     self.finish_time = self.play_time
                     self.state = GameState.WIN
+                    self._last_win_rank = self.leaderboard.add(self.finish_time)
             self.gardener.update(self.terrain, self.player)
             
             # Update snakes
@@ -1879,6 +1953,8 @@ class MoleGame:
             self.draw_game_over_screen()
         elif self.state == GameState.WIN:
             self.draw_win_screen()
+        elif self.state == GameState.LEADERBOARD:
+            self.draw_leaderboard_screen()
 
         # Letterbox: fill display black, then blit scaled virtual surface centred
         rect = self._get_render_rect()
@@ -1983,7 +2059,96 @@ class MoleGame:
         self.exit_to_home_button.rect.y = 500
         self.exit_to_home_button.draw(self.screen)
         self.exit_to_home_button.rect.y = orig_y  # Restore
+
+        # Show rank badge
+        rank = self._last_win_rank
+        if 1 <= rank <= 3:
+            medal = ["🥇 NEW BEST!", "🥈 2nd Place!", "🥉 3rd Place!"][rank - 1]
+            medal_colors = [(255, 215, 0), (192, 192, 192), (205, 127, 50)]
+            m_surf = self.font_small.render(medal, True, medal_colors[rank - 1])
+            self.screen.blit(m_surf, m_surf.get_rect(center=(SCREEN_WIDTH // 2, 390)))
+        elif rank > 0:
+            rank_surf = self.font_small.render(f"Rank #{rank} on leaderboard!", True, (180, 220, 180))
+            self.screen.blit(rank_surf, rank_surf.get_rect(center=(SCREEN_WIDTH // 2, 390)))
     
+    def draw_leaderboard_screen(self) -> None:
+        """Full leaderboard screen with top-10 times."""
+        self._draw_animated_bg(overlay_alpha=170)
+
+        cx = SCREEN_WIDTH // 2
+
+        # Title
+        title = self.font_large.render("LEADERBOARD", True, (255, 215, 0))
+        self.screen.blit(title, title.get_rect(center=(cx, 55)))
+
+        subtitle = self.font_tiny.render("Top 10 fastest wins", True, (180, 180, 180))
+        self.screen.blit(subtitle, subtitle.get_rect(center=(cx, 95)))
+
+        # Table header
+        pygame.draw.line(self.screen, (100, 100, 50),
+                         (cx - 250, 115), (cx + 250, 115), 1)
+
+        entries = self.leaderboard.entries
+        row_h = 46
+        start_y = 125
+
+        medal_colors = [
+            (255, 215, 0),    # gold
+            (210, 210, 210),  # silver
+            (205, 127, 50),   # bronze
+        ]
+        rank_prefixes = ["1st", "2nd", "3rd"]
+
+        font_rank = pygame.font.Font(None, 34)
+        font_time = pygame.font.Font(None, 38)
+        font_empty = pygame.font.Font(None, 30)
+
+        if not entries:
+            empty = font_empty.render("No wins recorded yet. Go win!", True, (160, 160, 160))
+            self.screen.blit(empty, empty.get_rect(center=(cx, 300)))
+        else:
+            for i, entry in enumerate(entries):
+                y = start_y + i * row_h
+                is_latest = (entry["time"] == self.finish_time
+                             and self.state == GameState.LEADERBOARD
+                             and i + 1 == self._last_win_rank)
+
+                # Row background
+                row_col = (60, 50, 15) if i < 3 else (35, 35, 35)
+                if is_latest:
+                    row_col = (40, 70, 40)
+                row_rect = pygame.Rect(cx - 250, y + 2, 500, row_h - 4)
+                pygame.draw.rect(self.screen, row_col, row_rect, border_radius=8)
+
+                # Rank
+                if i < 3:
+                    col = medal_colors[i]
+                    prefix = rank_prefixes[i]
+                else:
+                    col = (160, 160, 160)
+                    prefix = f"{i + 1}th"
+                rank_surf = font_rank.render(prefix, True, col)
+                self.screen.blit(rank_surf, (cx - 240, y + row_h // 2 - rank_surf.get_height() // 2))
+
+                # Time
+                time_surf = font_time.render(entry["label"], True, TEXT_WHITE)
+                self.screen.blit(time_surf, time_surf.get_rect(
+                    midright=(cx + 240, y + row_h // 2)))
+
+                # YOU marker for latest win
+                if is_latest:
+                    you = font_rank.render("← YOU", True, (100, 255, 120))
+                    self.screen.blit(you, (cx + 248, y + row_h // 2 - you.get_height() // 2))
+
+        pygame.draw.line(self.screen, (100, 100, 50),
+                         (cx - 250, start_y + len(entries) * row_h + 4),
+                         (cx + 250, start_y + len(entries) * row_h + 4), 1)
+
+        # Back button
+        mouse_pos = self._scale_mouse_pos(pygame.mouse.get_pos())
+        back_btn = Button(50, SCREEN_HEIGHT - 80, 150, 50, "BACK")
+        back_btn.update_hover(mouse_pos)
+        back_btn.draw(self.screen)
     def draw_playing_screen(self) -> None:
         # Sky gradient + clouds (drawn before terrain so terrain overlaps)
         self.clouds.draw_sky(self.screen)
