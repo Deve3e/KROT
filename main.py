@@ -35,13 +35,15 @@ class TextureManager:
         """Load textures from textures/ folder"""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         texture_files = {
-            "soil":     os.path.join(base_dir, "textures", "soil.png"),
-            "grass":    os.path.join(base_dir, "textures", "grass.png"), 
-            "plant":    os.path.join(base_dir, "textures", "plant.png"),
-            "sky":      os.path.join(base_dir, "textures", "sky.png"),
-            "gardener": os.path.join(base_dir, "textures", "gardener.png"),
-            "stone":    os.path.join(base_dir, "textures", "stone.png"),
-            "player":   os.path.join(base_dir, "textures", "player.png"),
+            "soil":       os.path.join(base_dir, "textures", "soil.png"),
+            "grass":      os.path.join(base_dir, "textures", "grass.png"),
+            "plant":      os.path.join(base_dir, "textures", "plant.png"),
+            "sky":        os.path.join(base_dir, "textures", "sky.png"),
+            "gardener":   os.path.join(base_dir, "textures", "gardener.png"),
+            "stone":      os.path.join(base_dir, "textures", "stone.png"),
+            "player":     os.path.join(base_dir, "textures", "player.png"),
+            "snake_head": os.path.join(base_dir, "textures", "snake_head.png"),
+            "snake_tail": os.path.join(base_dir, "textures", "snake_tail.png"),
         }
         
         for block_type, file_path in texture_files.items():
@@ -58,9 +60,9 @@ class TextureManager:
                 self.textures[block_type] = fallback
                 self.variants[block_type] = [fallback]
 
-        # Auto-load additional soil variants: soil2.png, soil3.png, ...
-        # Keep scanning until a file is missing.
         textures_dir = os.path.join(base_dir, "textures")
+
+        # Auto-load additional soil variants: soil2.png, soil3.png, ...
         for i in range(2, 100):
             path = os.path.join(textures_dir, f"soil{i}.png")
             if not os.path.exists(path):
@@ -72,6 +74,22 @@ class TextureManager:
                 print(f"Loaded texture: soil variant {i}")
             except Exception as e:
                 print(f"Failed to load soil variant {i}: {e}")
+                break
+
+        # Auto-load snake body variants: snake_body1.png, snake_body2.png, ...
+        # At least one must exist; keep scanning until a file is missing.
+        self.variants["snake_body"] = []
+        for i in range(1, 100):
+            path = os.path.join(textures_dir, f"snake_body{i}.png")
+            if not os.path.exists(path):
+                break
+            try:
+                tex = pygame.image.load(path).convert_alpha()
+                tex = pygame.transform.scale(tex, (self.block_size, self.block_size))
+                self.variants["snake_body"].append(tex)
+                print(f"Loaded texture: snake_body variant {i}")
+            except Exception as e:
+                print(f"Failed to load snake_body variant {i}: {e}")
                 break
     
     def _create_fallback_texture(self, block_type: str) -> pygame.Surface:
@@ -702,8 +720,8 @@ class Gardener:
 class Snake:
     """Snake enemy that slithers randomly underground and can pass through soil but not stone"""
     def __init__(self, start_x: float, start_y: float):
-        # 12 segments spacing by 0.8 blocks horizontally
-        self.segments = [[start_x - i * 0.8, start_y] for i in range(12)]
+        # 12 segments spaced 0.475 blocks apart (≈19 px) so textures overlap by 5 px
+        self.segments = [[start_x - i * 0.475, start_y] for i in range(12)]
         self.width = 0.6
         self.height = 0.6
         self.speed = 0.03
@@ -767,7 +785,7 @@ class Snake:
             self.segments[0][1] = new_hy
             
         # Segment follow behavior
-        spacing = 0.8
+        spacing = 0.475  # 19 px at block_size 40 → 5 px overlap between segments
         for i in range(1, len(self.segments)):
             prev = self.segments[i-1]
             curr = self.segments[i]
@@ -779,33 +797,78 @@ class Snake:
                 curr[0] = prev[0] - dx * ratio
                 curr[1] = prev[1] - dy * ratio
             
-    def draw(self, surface: pygame.Surface, camera: 'Camera2D') -> None:
-        # Draw snake body from tail to head
+    def draw(self, surface: pygame.Surface, camera: 'Camera2D',
+             texture_manager: Optional['TextureManager'] = None) -> None:
+        """Draw the snake tail-to-head so the head always renders on top.
+
+        Texture slots (all optional, falls back to gradient circles):
+          snake_head.png        – head segment
+          snake_body1.png, snake_body2.png, ...  – body segments (cycled)
+          snake_tail.png        – tail segment
+
+        All textures are assumed to face RIGHT (0°) in their source image.
+        Each segment is rotated to face the direction it is travelling.
+        """
         num_segs = len(self.segments)
-        for i in range(num_segs - 1, -1, -1):
-            hx, hy = self.segments[i]
-            screen_x, screen_y = camera.world_to_screen(hx, hy)
-            pixel_w = int(self.width * camera.block_size)
-            pixel_h = int(self.height * camera.block_size)
-            
-            # Map index to size factor (1.0 at head i=0, 0.4 at tail i=11)
-            factor = 1.0 - (i / (num_segs - 1)) * 0.6
-            radius = int((pixel_w / 2) * factor)
-            
-            # Green body gradient (brightest green at head i=0, darker at tail i=11)
-            color_factor = 1.0 - (i / (num_segs - 1))
-            color = (0, int(120 + 135 * color_factor), 0)
-            
-            cx = int(screen_x + pixel_w / 2)
-            cy = int(screen_y + pixel_h / 2)
-            pygame.draw.circle(surface, color, (cx, cy), max(2, radius))
-            
-            # Draw tiny red eyes on the head (first segment i=0)
+        pixel_w = int(self.width * camera.block_size)
+        pixel_h = int(self.height * camera.block_size)
+        seg_size = max(pixel_w, pixel_h)  # square blit size for textures
+
+        # Gather textures once (None if not loaded)
+        head_tex  = texture_manager.get_texture("snake_head")  if texture_manager else None
+        tail_tex  = texture_manager.get_texture("snake_tail")  if texture_manager else None
+        body_vars = (texture_manager.variants.get("snake_body") or []) if texture_manager else []
+
+        def _seg_angle(i: int) -> float:
+            """Angle (degrees) each segment faces – toward the head."""
             if i == 0:
-                eye_offset_x = int(radius * 0.4)
-                eye_offset_y = int(radius * 0.4)
-                pygame.draw.circle(surface, (255, 0, 0), (cx - eye_offset_x, cy - eye_offset_y), 2)
-                pygame.draw.circle(surface, (255, 0, 0), (cx + eye_offset_x, cy - eye_offset_y), 2)
+                # Head: faces the direction it's moving
+                prev = self.segments[1] if num_segs > 1 else self.segments[0]
+                dx = self.segments[0][0] - prev[0]
+                dy = self.segments[0][1] - prev[1]
+            else:
+                # Body / tail: faces toward the segment ahead of it
+                dx = self.segments[i - 1][0] - self.segments[i][0]
+                dy = self.segments[i - 1][1] - self.segments[i][1]
+            return math.degrees(math.atan2(dy, dx))  # 0° = right
+
+        def _blit_tex(tex: pygame.Surface, cx: int, cy: int, angle: float) -> None:
+            """Scale, rotate and blit a texture centred on (cx, cy)."""
+            scaled  = pygame.transform.scale(tex, (seg_size, seg_size))
+            rotated = pygame.transform.rotate(scaled, -angle)
+            rect    = rotated.get_rect(center=(cx, cy))
+            surface.blit(rotated, rect.topleft)
+
+        # Draw tail → head so the head is always on top
+        for i in range(num_segs - 1, -1, -1):
+            hx, hy     = self.segments[i]
+            sx, sy     = camera.world_to_screen(hx, hy)
+            cx         = int(sx + pixel_w / 2)
+            cy         = int(sy + pixel_h / 2)
+            angle      = _seg_angle(i)
+
+            if i == 0 and head_tex:
+                _blit_tex(head_tex, cx, cy, angle)
+
+            elif i == num_segs - 1 and tail_tex:
+                _blit_tex(tail_tex, cx, cy, angle)
+
+            elif body_vars:
+                # Cycle through available body textures
+                tex = body_vars[(i - 1) % len(body_vars)]
+                _blit_tex(tex, cx, cy, angle)
+
+            else:
+                # ── Fallback: gradient circles ──
+                factor       = 1.0 - (i / (num_segs - 1)) * 0.6
+                radius       = max(2, int((pixel_w / 2) * factor))
+                color_factor = 1.0 - (i / (num_segs - 1))
+                color        = (0, int(120 + 135 * color_factor), 0)
+                pygame.draw.circle(surface, color, (cx, cy), radius)
+                if i == 0:  # fallback eyes on head
+                    eo = int(radius * 0.4)
+                    pygame.draw.circle(surface, (255, 0, 0), (cx - eo, cy - eo), 2)
+                    pygame.draw.circle(surface, (255, 0, 0), (cx + eo, cy - eo), 2)
 
 
 class ParticleSystem:
@@ -1493,7 +1556,7 @@ class MoleGame:
         
         # Draw snakes
         for snake in self.snakes:
-            snake.draw(self.screen, self.camera)
+            snake.draw(self.screen, self.camera, self.texture_manager)
 
         # Draw block-break particles on top of everything
         self.particles.draw(self.screen, self.camera)
